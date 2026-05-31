@@ -80,6 +80,8 @@ wget -O - https://raw.githubusercontent.com/kenzok8/luci-app-daede/refs/heads/ma
 2. 选择后端（dae 或 daed）
 3. 导入配置文件并启动
 
+📖 **新手教程**：[dae 后端使用指南](docs/dae-guide.md) —— 订阅、节点、分组、路由、DNS 怎么填，常见问题一篇讲清。
+
 ## 依赖
 
 | 包名 | 说明 |
