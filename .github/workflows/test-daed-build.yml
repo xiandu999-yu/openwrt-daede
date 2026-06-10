@@ -1,10 +1,14 @@
 name: Test daed build
 
-# Iteration-only: builds daed for one arch and uploads the .apk as an artifact.
+# Iteration-only: builds dae/daed for one arch and uploads the .apk as an artifact.
 # No feed upload, no release — safe to run on feature branches.
 
 on:
   workflow_dispatch:
+    inputs:
+      packages:
+        description: Packages to build
+        default: "dae daed"
 
 permissions:
   contents: read
@@ -15,18 +19,18 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        arch: [x86_64]
+        arch: [x86_64, aarch64_generic]
         sdk: ["25.12"]
     steps:
       - uses: actions/checkout@v6
 
-      - name: Build daed
+      - name: Build packages
         uses: kenzok8/gh-action-sdk@hash
         env:
           CONTAINER: immortalwrt/sdk
           ARCH: ${{ matrix.arch }}-openwrt-${{ matrix.sdk }}
           FEEDNAME: daede
-          PACKAGES: daed
+          PACKAGES: ${{ github.event.inputs.packages }}
           EXTRA_FEEDS: src-git|wall|https://github.com/kenzok8/wall
           NO_REFRESH_CHECK: true
           INDEX: 1
@@ -42,6 +46,6 @@ jobs:
       - uses: actions/upload-artifact@v6
         if: always()
         with:
-          name: daed-${{ matrix.arch }}-${{ matrix.sdk }}
+          name: pkgs-${{ matrix.arch }}-${{ matrix.sdk }}
           path: bin/packages/${{ matrix.arch }}/daede/*.apk
           if-no-files-found: warn

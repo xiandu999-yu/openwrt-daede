@@ -1,0 +1,71 @@
+name: Assemble dae source
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  assemble:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Load pins
+        run: cat daed/pins.env | grep -E '^[A-Z]' >> "$GITHUB_ENV"
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.0"
+
+      - name: Assemble source tree
+        run: |
+          set -eux
+          OUT="dae-${DAE_VERSION}"
+          rm -rf "$OUT"; mkdir -p "$OUT"
+
+          fetch_at() {
+            git clone --filter=blob:none --no-checkout "$1" "$2"
+            git -C "$2" checkout "$3"
+          }
+
+          fetch_at https://github.com/kenzok8/dae "$OUT/core" "$CORE_COMMIT"
+          ( cd "$OUT/core" && git submodule update --init )
+          fetch_at https://github.com/kenzok8/outbound "$OUT/outbound" "$OUTBOUND_COMMIT"
+          fetch_at https://github.com/kenzok8/quic-go "$OUT/quic-go" "$QUICGO_COMMIT"
+
+          ( cd "$OUT/core" \
+              && go mod edit -replace github.com/daeuniverse/outbound=../outbound \
+              && go mod edit -replace github.com/olicesx/quic-go=../quic-go \
+              && go mod tidy \
+              && cp "$GITHUB_WORKSPACE/daed/default.pgo" default.pgo )
+
+          find "$OUT" -name .git -type d -prune -exec rm -rf {} +
+
+          TARBALL="dae-src-${DAE_VERSION}.tar.gz"
+          tar --numeric-owner --owner=0 --group=0 --sort=name -czf "$TARBALL" "$OUT"
+          echo "PKG_HASH=$(sha256sum "$TARBALL" | cut -d' ' -f1)" >> "$GITHUB_ENV"
+          echo "TARBALL=$TARBALL" >> "$GITHUB_ENV"
+
+      - name: Publish to dae-src release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view dae-src --repo "${{ github.repository }}" >/dev/null 2>&1 || \
+            gh release create dae-src --repo "${{ github.repository }}" \
+              --title "dae pinned source" --notes "Auto-assembled dae source tarballs. Do not delete." --latest=false
+          gh release upload dae-src "$TARBALL" --repo "${{ github.repository }}" --clobber
+
+      - name: Write PKG_HASH into Makefile and push
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sed -i "s/^PKG_VERSION:=.*/PKG_VERSION:=${DAE_VERSION}/" dae/Makefile
+          sed -i "s/^PKG_HASH:=.*/PKG_HASH:=${PKG_HASH}/" dae/Makefile
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add dae/Makefile
+          git diff --cached --quiet && { echo "no change"; exit 0; }
+          git commit -m "chore(dae): assemble pinned source ${DAE_VERSION}"
+          git push origin "HEAD:${{ github.ref_name }}"
