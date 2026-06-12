@@ -221,7 +221,7 @@ function renderDaeForms(ctx) {
 	};
 
 	/* Manual nodes (share links) */
-	s = m.section(form.GridSection, 'node', _('Nodes'),
+	s = m.section(form.GridSection, 'node', _('Manual nodes'),
 		_('One node share link per line — ss, vmess, vless, trojan, tuic, hysteria2, socks5.'));
 	s.addremove = true;
 	s.anonymous = true;
@@ -372,8 +372,8 @@ function renderDaeForms(ctx) {
 				.finally(function() { save.disabled = false; });
 		});
 
-		/* make each form section collapsible; keep the two everyday ones open */
-		accordionizeSections(mapNode, [ _('Subscriptions'), _('Nodes') ]);
+		/* beginner default: only Subscriptions starts open; nodes/groups/routing/dns/logging collapse */
+		accordionizeSections(mapNode, [ _('Subscriptions') ]);
 
 		const cardChildren = [
 			E('h4', { 'class': 'dd-card-title' }, _('dae Configuration')),
