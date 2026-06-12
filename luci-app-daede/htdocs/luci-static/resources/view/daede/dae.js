@@ -110,7 +110,9 @@ const GEN = '/usr/share/luci-app-daede/gen-dae-config.sh';
    stays visible in the edit dialog and on hover. */
 function ellipsisCell(section_id) {
 	const v = this.cfgvalue(section_id) || '';
-	const short = v.length > 52 ? v.slice(0, 52) + '…' : v;
+	/* middle-ellipsis keeps the host head + tail visible (the meaningful parts
+	   of a sub link) while staying short enough for one line on a phone */
+	const short = v.length > 30 ? v.slice(0, 18) + '…' + v.slice(-9) : v;
 	return E('span', { 'title': v, 'style': 'font-family:ui-monospace,Menlo,monospace;font-size:12px' }, short);
 }
 
