@@ -180,14 +180,18 @@ const CSS = [
 	'.dd-settings-card .cbi-section-table-row>td.cbi-section-actions{flex:0 0 auto !important;display:flex;gap:4px}',
 	'}',
 	'.dd-conv-card{padding:14px 16px;margin-bottom:10px}',
-	'.dd-conv-card h3{font-size:18px;margin:0 0 6px}',
 	'.dd-conv-url-row,.dd-conv-import,.dd-conv-toolbar,.dd-conv-heading{display:flex;align-items:center;gap:8px;flex-wrap:wrap}',
-	'.dd-conv-url-row input,.dd-conv-filter,.dd-conv-target,.dd-conv-yaml{box-sizing:border-box;border:1px solid rgba(128,128,128,.28);border-radius:6px;background:transparent;color:inherit;font-size:12px;padding:7px 9px}',
+	'.dd-conv-url-row input,.dd-conv-filter,.dd-conv-target,.dd-conv-ua,.dd-conv-yaml{box-sizing:border-box;border:1px solid rgba(128,128,128,.28);border-radius:6px;background:transparent;color:inherit;font-size:12px;padding:7px 9px}',
 	'.dd-conv-url-row input{flex:1;min-width:240px}',
+	'.dd-conv-ua{width:230px;max-width:230px;height:32px;min-height:32px;padding:4px 28px 4px 8px;line-height:22px}',
 	'.dd-conv-yaml{width:100%;min-height:150px;resize:vertical;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;line-height:1.5}',
 	'.dd-conv-or{text-align:center;font-size:11px;opacity:.5;margin:7px 0}',
-	'.dd-conv-heading{justify-content:space-between;margin-bottom:8px}',
+	'.dd-conv-heading{justify-content:space-between;gap:10px;margin-bottom:10px}',
 	'.dd-conv-heading .dd-card-title{margin:0}',
+	'.dd-conv-summary{display:flex;align-items:center;justify-content:flex-end;flex-wrap:wrap;gap:4px 10px;font-size:11px;font-variant-numeric:tabular-nums}',
+	'.dd-conv-summary-item{display:inline-flex;align-items:baseline;gap:4px;white-space:nowrap;color:inherit;opacity:.62}',
+	'.dd-conv-summary-item strong{font-size:12px;font-weight:650;opacity:1;color:inherit}',
+	'.dd-conv-summary-label{font-size:10.5px}',
 	'.dd-conv-toolbar{margin-bottom:8px}',
 	'.dd-conv-filter{margin-left:auto;min-width:220px}',
 	'.dd-conv-results{border:1px solid rgba(128,128,128,.18);border-radius:7px;max-height:420px;overflow:auto}',
@@ -200,9 +204,15 @@ const CSS = [
 	'.dd-conv-result-state.dup{opacity:.55}',
 	'.dd-conv-result-state.bad,.dd-conv-status.err{color:#d96d6d}',
 	'.dd-conv-import label{font-size:12px;font-weight:600;opacity:.72}',
+	'.dd-conv-airport{display:grid;grid-template-columns:max-content minmax(240px,420px) max-content 130px;gap:8px;align-items:center;margin-bottom:9px;padding-bottom:9px;border-bottom:1px solid rgba(128,128,128,.15)}',
+	'.dd-conv-airport .dd-conv-target,.dd-conv-airport-name{box-sizing:border-box;width:100% !important;min-width:0 !important;height:32px !important;min-height:32px !important;margin:0 !important;padding:4px 8px !important;border:1px solid rgba(128,128,128,.28);border-radius:6px;background-color:transparent;color:inherit;font-size:12px !important;line-height:22px !important;box-shadow:none}',
+	'.dd-conv-airport-name{max-width:420px}',
+	'.dd-conv-group-summary{margin:2px 0 10px;padding:9px 11px;border-left:3px solid rgba(74,160,101,.65);border-radius:3px;background:rgba(74,160,101,.07);font-size:12px;line-height:1.5}',
+	'.dd-conv-group-summary.err{border-left-color:#d96d6d;background:rgba(217,109,109,.07);color:#d96d6d}',
+	'.dd-conv-submit{justify-content:flex-end}',
 	'.dd-conv-import .cbi-button{margin-left:auto}',
 	'.dd-conv-status{margin-top:9px;font-size:11.5px;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;min-height:16px}',
-	'@media(max-width:640px){.dd-conv-filter{margin-left:0;width:100%}.dd-conv-result{grid-template-columns:20px minmax(90px,1fr) 68px}.dd-conv-result-state{grid-column:2/4;font-size:11px}.dd-conv-import .cbi-button{margin-left:0;width:100%}.dd-conv-url-row input{min-width:100%;width:100%}.dd-conv-url-row .cbi-button{width:100%}}'
+	'@media(max-width:640px){.dd-conv-card{padding:12px}.dd-conv-heading{align-items:flex-start}.dd-conv-heading .dd-card-title{width:100%}.dd-conv-summary{justify-content:flex-start;width:100%;gap:5px 12px;padding-top:2px}.dd-conv-summary-item{min-width:74px}.dd-conv-filter{margin-left:0;width:100%}.dd-conv-result{grid-template-columns:20px minmax(90px,1fr) 68px}.dd-conv-result-state{grid-column:2/4;font-size:11px}.dd-conv-import .cbi-button{margin-left:0;width:100%}.dd-conv-airport{grid-template-columns:82px minmax(0,1fr)}.dd-conv-airport>*{max-width:none !important}.dd-conv-url-row input{min-width:100%;width:100%}.dd-conv-url-row .dd-conv-ua,.dd-conv-url-row .cbi-button{width:100%;max-width:none}}'
 ].join('');
 
 return baseclass.extend({ CSS: CSS });
