@@ -53,8 +53,9 @@
 不是简单打包上游二进制，而是一条**可复现、性能优化、自托管**的源码构建链：
 
 1. **性能优化栈**（相比原版 dae 的核心差异）
-   - 内核源码用 [olicesx](https://github.com/olicesx) 的性能 fork（eBPF 数据面优化：连接状态合并、egress 重定向、DNS/UDP 路径优化等）
-   - 出站 / QUIC 也用对应的优化分支（`outbound` anytls/sticky-ip 等、`quic-go` 连接池）
+   - **dae 核心**：追 [daeuniverse/dae](https://github.com/daeuniverse/dae) 官方 `main`，装配时把 [olicesx](https://github.com/olicesx) 的性能 fork 作基线、官方 main merge 在其上（eBPF 数据面优化：连接状态合并、egress 重定向、DNS/UDP 路径优化等）。核心永远跟官方同步，又保住性能 fork
+   - **QUIC**：官方/daeuniverse 基线 + 我们自持的性能补丁（`ci/patches/quic-go/`，B-tree 节点池等），不再依赖 olicesx 分支
+   - **出站**：`outbound` 仍用 olicesx 的优化分支（anytls/sticky-ip 等，分叉较大暂骑上游）
    - **PGO**（Profile-Guided Optimization）：内置 `ci/default.pgo` 采样档，`-pgo=auto` 让编译器按真实热点优化
    - **Go 1.26** + `GOEXPERIMENT=newinliner,simd`（新内联器 + SIMD），静态链接、`-trimpath`
 
@@ -72,10 +73,12 @@
 | 依赖 | 来源 | 状态 |
 |------|------|------|
 | **PGO 采样档** | 自采样 | ✅ **已 vendored**（`ci/default.pgo`，完全闭合） |
-| **性能 fork**（dae 核心 / outbound / quic-go） | [olicesx](https://github.com/olicesx) → 镜像到 [kenzok8](https://github.com/kenzok8) | ⚠️ **半闭合**：已镜像防删，但仍跟随其 commit；后续自维护 patchset 可完全闭合 |
+| **dae 核心** | daeuniverse/dae `main` + olicesx 性能基线（装配时 merge） | ✅ **追官方 + 保性能**：核心跟官方同步，性能 fork 作冻结基线，不再受 olicesx 滞后影响 |
+| **quic-go** | daeuniverse 基线 + 自持补丁 `ci/patches/quic-go/` | ✅ **完全闭合**：性能补丁自有，olicesx 删库无影响 |
+| **outbound** | [olicesx](https://github.com/olicesx) → 镜像 [kenzok8](https://github.com/kenzok8) | ⚠️ **半闭合**：130 commit 大分叉，暂骑上游（已镜像防删） |
 | **真上游** | [daeuniverse/dae](https://github.com/daeuniverse/dae) · [daed](https://github.com/daeuniverse/daed) · dae-wing | 🔗 **主动跟随**（真源头，追它是对的） |
 
-> 设计哲学：**把易变、会删的中间层逐步内化**（PGO 已闭、性能 fork 已镜像兜底），**只对真正的源头 daeuniverse 保持跟随**。
+> 设计哲学：**把易变、会删的中间层逐步内化**——PGO 已 vendored、quic-go 性能已转自持补丁、dae 核心改追官方 main（olicesx 性能作基线 merge）；只剩 outbound 因分叉过大暂骑上游。详见 `ci/PERF-PATCHES.md`。
 
 ### 相比其他第三方 dae/daed 的优势
 
