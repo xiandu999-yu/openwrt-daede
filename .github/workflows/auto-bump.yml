@@ -50,14 +50,25 @@ jobs:
           daed_date=$(gh api repos/daeuniverse/daed/commits/$daed_new --jq '.commit.committer.date' | cut -dT -f1 | tr '-' '.')
           wing_date=$(gh api repos/daeuniverse/dae-wing/commits/$wing_new --jq '.commit.committer.date' | cut -dT -f1 | tr '-' '.')
           core_date=$(gh api repos/daeuniverse/dae/commits/$core_up_new --jq '.commit.committer.date' | cut -dT -f1 | tr '-' '.')
+          outbound_date=$(gh api repos/olicesx/outbound/commits/$outbound_new --jq '.commit.committer.date' | cut -dT -f1 | tr '-' '.')
           # version = newest component date (YYYY.MM.DD sorts chronologically), used
           # for BOTH dae and daed so the stamp never regresses when only the core moves.
-          ver=$(printf '%s\n%s\n%s\n' "$daed_date" "$wing_date" "$core_date" | sort -r | head -1)
+          ver=$(printf '%s\n%s\n%s\n%s\n' "$daed_date" "$wing_date" "$core_date" "$outbound_date" | sort -r | head -1)
+          changes=""
+          add_change() {
+            [ "$2" = "$3" ] && return 0
+            changes="${changes:+$changes, }$1 $(printf '%s' "$2" | cut -c1-7)→$(printf '%s' "$3" | cut -c1-7)"
+          }
+          add_change daed "$DAED_COMMIT" "$daed_new"
+          add_change wing "$WING_COMMIT" "$wing_new"
+          add_change core "$CORE_UPSTREAM_COMMIT" "$core_up_new"
+          add_change outbound "$OUTBOUND_COMMIT" "$outbound_new"
           {
             echo "changed=true"
             echo "daed=$daed_new"; echo "wing=$wing_new"; echo "core_up=$core_up_new"
             echo "outbound=$outbound_new"
             echo "ver=$ver"
+            echo "changes=$changes"
           } >> "$GITHUB_OUTPUT"
 
       - name: Sync kenzok8 forks from olicesx
@@ -89,7 +100,7 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout -B "$STAGING"
           git add ci/pins.env
-          git commit -m "chore: bump dae/daed pins to daed-${{ steps.detect.outputs.daed }}"
+          git commit -m "chore: bump pins (${{ steps.detect.outputs.changes }})"
           git push -f origin "$STAGING"
 
       - name: Assemble + gate build on staging

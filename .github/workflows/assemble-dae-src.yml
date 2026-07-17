@@ -81,14 +81,24 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          set -eu
+          cur_ver=$(sed -n 's/^PKG_VERSION:=//p' dae/Makefile)
+          cur_rel=$(sed -n 's/^PKG_RELEASE:=//p' dae/Makefile)
+          if [ "$cur_ver" = "${DAE_VERSION}" ] && grep -qx "PKG_SOURCE:=${TARBALL}" dae/Makefile; then
+            echo "no change"; exit 0
+          fi
+          if [ "$cur_ver" = "${DAE_VERSION}" ]; then
+            rel=$((cur_rel + 1))
+          else
+            rel=1
+          fi
           sed -i "s/^PKG_VERSION:=.*/PKG_VERSION:=${DAE_VERSION}/" dae/Makefile
-          # New upstream pin creates a new PKG_VERSION, so reset the OpenWrt package release.
-          sed -i "s/^PKG_RELEASE:=.*/PKG_RELEASE:=1/" dae/Makefile
+          sed -i "s/^PKG_RELEASE:=.*/PKG_RELEASE:=${rel}/" dae/Makefile
           sed -i "s|^PKG_SOURCE:=.*|PKG_SOURCE:=${TARBALL}|" dae/Makefile
           sed -i "s/^PKG_HASH:=.*/PKG_HASH:=${PKG_HASH}/" dae/Makefile
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add dae/Makefile
           git diff --cached --quiet && { echo "no change"; exit 0; }
-          git commit -m "chore(dae): assemble pinned source ${DAE_VERSION}"
+          git commit -m "chore(dae): assemble pinned source ${DAE_VERSION}-${rel}"
           git push origin "HEAD:${{ github.ref_name }}"
