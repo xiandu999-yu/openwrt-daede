@@ -4,7 +4,7 @@
 
 **Goal:** 让 daed 原生面板、daed 自带 cron、LuCI 手动更新和 LuCI cron 都能严格同步订阅节点，并在代理运行时立即应用运行态。
 
-**Architecture:** 保持现有 updateSubscription GraphQL 签名不变，在 pinned dae-wing 上维护一个 0006 补丁。补丁在同一数据库事务里按节点 Link 对账：保留仍存在的节点、保护 fixed 组节点、删除普通组里的失效节点、导入新增节点；如果系统正在运行，则提交前调用现有 config.Run 应用运行态。UpdateById 用互斥锁串行化，兼容原生 Web 的批量并发请求。
+**Architecture:** 保持现有 updateSubscription GraphQL 签名不变，在 pinned dae-wing 上维护一个 0006 补丁。补丁先在数据库事务里按节点 Link 严格对账并提交，再由 config 层用统一的 runLock 排队、合并运行态应用；锁顺序固定为 runLock → DB transaction，避免原生 Web 批量更新和并发 cron 随机失败或死锁。
 
 **Tech Stack:** OpenWrt Makefile、Go 1.26、GORM/SQLite、GraphQL、POSIX Shell、dae-wing pinned source patches。
 
@@ -13,7 +13,7 @@
 ## 文件结构
 
 - Create: daed/patches/0006-reconcile-stale-subscription-nodes.patch — dae-wing 严格同步、运行态应用及回归测试。
-- Modify: daed/Makefile — PKG_RELEASE 从 2 升到 3。
+- Modify: daed/Makefile — 先同步发布基线到 2026.07.20-r1，再把 PKG_RELEASE 升到 2。
 - Modify: docs/superpowers/specs/2026-07-21-daed-strict-subscription-sync-design.md — 记录保持旧 GraphQL 签名的最终取舍。
 
 ### Task 1: 在精确 pinned dae-wing 上建立失败测试
@@ -55,15 +55,18 @@ Expected: FAIL，原因是 reconcileSubscriptionNodes 尚不存在。
 
 **Files:**
 - Modify in temporary pinned source: graphql/service/subscription/mutation_utils.go
+- Modify in temporary pinned source: graphql/service/config/mutation_utils.go
+- Modify in temporary pinned source: graphql/mutation.go
+- Modify in temporary pinned source: cmd/run.go
 - Modify in temporary pinned source: graphql/root_schema.go
 
 - [ ] **Step 1: 增加串行更新锁和运行态依赖**
 
-在 mutation_utils.go 引入 graphql/service/config，并增加：
+在 subscription/mutation_utils.go 引入 graphql/service/config，并增加：
 
     var subscriptionUpdateMu sync.Mutex
 
-UpdateById 从拉取订阅开始持有该锁，避免原生 Web 的 Promise.all 同时触发多个 config.Run。
+多个订阅可以并行下载；只把 BeginTx → 对账 → commit 放进该锁，避免 SQLite 多 writer。不要让该锁包住运行态应用。
 
 - [ ] **Step 2: 实现严格节点对账 helper**
 
@@ -83,34 +86,43 @@ UpdateById 从拉取订阅开始持有该锁，避免原生 Web 的 Promise.all 
 
 同一个 stale 节点同时属于 fixed 和普通组时按 staleFixed 处理，保留该节点和全部显式组关系。
 
-- [ ] **Step 3: 把更新、严格同步和应用放进一个事务**
+- [ ] **Step 3: 统一 config.Run 的锁和事务顺序**
+
+把 config.Run 的现有主体拆成 runLocked。显式 GraphQL Run 保留 TryLock 快速报错，但必须先拿 runLock 再开事务。新增阻塞等待的：
+
+    func ApplyIfRunning(ctx context.Context) error
+
+ApplyIfRunning 用 runLock.Lock() 排队，拿锁后重新检查 System.Running 和 modified；确实需要应用时才开事务调用 runLocked。修改 graphql/mutation.go 和 cmd/run.go，让显式运行与启动恢复都调用新的 config.Run(ctx, dry)，不再由调用方先开事务。所有路径的锁顺序统一为 runLock → DB transaction。
+
+- [ ] **Step 4: 订阅提交后自动应用**
 
 UpdateById 的顺序改为：
 
     links, err := fetchLinks(m.Link)
+    subscriptionUpdateMu.Lock()
     tx := db.BeginTx(ctx)
     err = reconcileSubscriptionNodes(tx, subID, links)
     err = tx.Model(&m).Update("updated_at", time.Now()).Error
     err = AutoUpdateVersionByIds(tx, []uint{subID})
-    if system.Running {
-        _, err = config.Run(tx, false)
-    }
+    err = tx.Commit().Error
+    subscriptionUpdateMu.Unlock()
+    err = config.ApplyIfRunning(ctx)
 
-任一步失败都回滚。config.Run 失败时 GraphQL 返回原错误，不显示更新成功。
+数据库提交失败时不应用。应用失败时数据库更新保留、mutation 返回“订阅已更新但应用失败”，modified 状态继续为 true，下一次可重试。
 
-- [ ] **Step 4: 更新 schema 注释**
+- [ ] **Step 5: 更新 schema 注释**
 
 改为：
 
     # updateSubscription re-fetches and strictly reconciles subscription nodes. Stale nodes pinned by fixed groups become independent nodes.
 
-- [ ] **Step 5: 格式化并运行回归测试**
+- [ ] **Step 6: 格式化并运行回归测试**
 
 Run:
 
-    gofmt -w graphql/service/subscription/mutation_utils.go graphql/service/subscription/mutation_utils_test.go
-    go test -tags dae_stub_ebpf ./graphql/service/subscription -count=1
-    go test -tags dae_stub_ebpf ./graphql/service/group ./graphql/service/config -count=1
+    gofmt -w graphql/service/subscription/mutation_utils.go graphql/service/subscription/mutation_utils_test.go graphql/service/config/mutation_utils.go graphql/mutation.go cmd/run.go
+    go test -tags dae_stub_ebpf ./graphql/service/subscription ./graphql/service/config -count=1 -race
+    go test -tags dae_stub_ebpf ./graphql/service/group -count=1
     go test -tags dae_stub_ebpf ./graphql/... -count=1
 
 Expected: 所有命令 exit 0。
@@ -127,6 +139,9 @@ Expected: 所有命令 exit 0。
 
     graphql/service/subscription/mutation_utils.go
     graphql/service/subscription/mutation_utils_test.go
+    graphql/service/config/mutation_utils.go
+    graphql/mutation.go
+    cmd/run.go
     graphql/root_schema.go
 
 Subject: [PATCH] daed: strictly reconcile subscription updates
@@ -139,9 +154,9 @@ Expected: 六个补丁都能按顺序 clean apply。
 
 - [ ] **Step 3: bump daed 包版本**
 
-修改 daed/Makefile：
+在同步 v2026.07.20 发布基线后修改 daed/Makefile：
 
-    PKG_RELEASE:=3
+    PKG_RELEASE:=2
 
 不修改 PKG_VERSION、PKG_SOURCE 或 PKG_HASH，因为只增加 Build/Prepare 阶段应用的本地补丁。
 
@@ -166,7 +181,7 @@ Expected: exit 0。
     make package/daed/clean
     make package/daed/compile V=s
 
-Expected: 生成 daed 2026.07.17-r3 对应架构包，补丁全部应用且 Go/eBPF 编译成功。
+Expected: 生成 daed 2026.07.20-r2 对应架构包，补丁全部应用且 Go/eBPF 编译成功。
 
 - [ ] **Step 2: 读取路由器实验清单并做只读基线**
 
@@ -174,7 +189,7 @@ Expected: 生成 daed 2026.07.17-r3 对应架构包，补丁全部应用且 Go/e
 
 - [ ] **Step 3: 临时安装 r3 并验证原生面板**
 
-备份当前包信息和配置数据库，上传单个 daed 测试包，安装后只重启 daed。构造或选择可安全测试的订阅：普通组单独引用若干节点、fixed 组固定一个节点，然后在 daed 原生面板点击更新。
+备份当前包信息和配置数据库，上传 2026.07.20-r2 测试包，安装后只重启 daed。构造或选择可安全测试的订阅：普通组单独引用若干节点、fixed 组固定一个节点，然后在 daed 原生面板点击更新。
 
 Expected:
 
@@ -193,4 +208,3 @@ Expected:
 确认代理访问正常、daed 没有重启循环或 reload timeout；运行 git status --short 和 git diff --check。
 
 Expected: 只有计划内文件变更，diff 无空白错误。验证通过后再由用户决定 commit、push 和发布。
-
