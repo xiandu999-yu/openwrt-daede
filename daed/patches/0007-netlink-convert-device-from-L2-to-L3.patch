@@ -1,0 +1,22 @@
+--- a/dae-core/control/netkit_linux.go	2026-07-20 22:37:07.000000000 +0800
++++ b/dae-core/control/netkit_linux.go	2026-07-23 14:00:20.567390606 +0800
+@@ -42,7 +42,7 @@
+ 	args := []string{"link", "add", name, "type", "netkit", "peer", peerName}
+ 
+ 	// Add mode. L2 keeps netkit compatible with dae's Ethernet-based datapath.
+-	args = append(args, "mode", "L2")
++	args = append(args, "mode", "L3")
+ 
+ 	// Add scrub configuration if requested
+ 	// scrub=0 means NETKIT_SCRUB_NONE (don't clear skb->mark)
+--- a/control/netkit_netlink.go	2026-07-20 22:37:07.000000000 +0800
++++ b/control/netkit_netlink.go	2026-07-23 14:01:00.966573696 +0800
+@@ -52,7 +52,7 @@
+ 	// PeerPolicy: FORWARD (pass traffic on peer side)
+ 	netkit := &netlink.Netkit{
+ 		LinkAttrs:  attrs,
+-		Mode:       netlink.NETKIT_MODE_L2,
++		Mode:       netlink.NETKIT_MODE_L3,
+ 		Policy:     netlink.NETKIT_POLICY_FORWARD,
+ 		PeerPolicy: netlink.NETKIT_POLICY_FORWARD,
+ 	}
