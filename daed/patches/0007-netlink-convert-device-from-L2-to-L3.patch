@@ -9,8 +9,8 @@
  
  	// Add scrub configuration if requested
  	// scrub=0 means NETKIT_SCRUB_NONE (don't clear skb->mark)
---- a/control/netkit_netlink.go	2026-07-20 22:37:07.000000000 +0800
-+++ b/control/netkit_netlink.go	2026-07-23 14:01:00.966573696 +0800
+--- a/dae-core/control/netkit_netlink.go	2026-07-20 22:37:07.000000000 +0800
++++ b/dae-core/control/netkit_netlink.go	2026-07-23 14:01:00.966573696 +0800
 @@ -52,7 +52,7 @@
  	// PeerPolicy: FORWARD (pass traffic on peer side)
  	netkit := &netlink.Netkit{
