@@ -9,13 +9,13 @@ PKG_VERSION:=2026.08.05
 PKG_RELEASE:=5
 
 PKG_SOURCE:=dae-src-2026.08.05-066b0005034b.tar.gz
-PKG_SOURCE_URL:=https://github.com/kenzok8/openwrt-daede/releases/download/dae-src
+PKG_SOURCE_URL:=https://github.com/xiandu999-yu/openwrt-daede/releases/download/dae-src
 PKG_SOURCE_SUBDIR:=$(PKG_NAME)-$(PKG_VERSION)
 PKG_HASH:=066b0005034b591ba4e4426b66d1680614059ffc47d4a55aa2ea61d7331abb6a
 
 PKG_LICENSE:=AGPL-3.0-only
 PKG_LICENSE_FILE:=LICENSE
-PKG_MAINTAINER:=kenzok8
+PKG_MAINTAINER:=xiandu999-yu
 
 DAE_BUILD_DIR:=$(BUILD_DIR)/$(PKG_NAME)-$(PKG_VERSION)
 PKG_BUILD_DIR:=$(DAE_BUILD_DIR)/core
