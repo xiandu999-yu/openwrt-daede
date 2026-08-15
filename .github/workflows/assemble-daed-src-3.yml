@@ -50,6 +50,9 @@ jobs:
           git -C "$OUT/wing/dae-core" -c user.email=ci@local -c user.name=ci merge --no-edit "$CORE_UPSTREAM_COMMIT"
           git -C "$OUT/wing/dae-core" submodule update --init
           fetch_at https://github.com/olicesx/outbound "$OUT/outbound" "$OUTBOUND_COMMIT"
+          if ls "$GITHUB_WORKSPACE"/ci/patches/outbound/*.patch >/dev/null 2>&1; then
+            git -C "$OUT/outbound" apply "$GITHUB_WORKSPACE"/ci/patches/outbound/*.patch
+          fi
           # quic-go: fetch the base, then apply any self-owned perf patches we still
           # carry on top of it. An empty patch directory is a no-op.
           fetch_at https://github.com/olicesx/quic-go "$OUT/quic-go" "$QUICGO_BASE_COMMIT"
