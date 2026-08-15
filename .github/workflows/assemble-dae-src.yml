@@ -35,7 +35,9 @@ jobs:
           ( cd "$OUT/core" && git submodule update --init )
 
           fetch_at https://github.com/olicesx/outbound "$OUT/outbound" "$OUTBOUND_COMMIT"
-
+          if ls "$GITHUB_WORKSPACE"/ci/patches/outbound/*.patch >/dev/null 2>&1; then
+            git -C "$OUT/outbound" apply "$GITHUB_WORKSPACE"/ci/patches/outbound/*.patch
+          fi
           # quic-go: 获取基础版本并应用补丁（若有）
           fetch_at https://github.com/olicesx/quic-go "$OUT/quic-go" "$QUICGO_BASE_COMMIT"
           if ls "$GITHUB_WORKSPACE"/ci/patches/quic-go/*.patch >/dev/null 2>&1; then
