@@ -39,8 +39,9 @@ include $(INCLUDE_DIR)/package.mk
 include $(INCLUDE_DIR)/bpf.mk
 include $(TOPDIR)/feeds/packages/lang/golang/golang-package.mk
 
+# 关闭 PGO（关键）
 GO_PKG_BUILD_VARS+= \
-	GOFLAGS="-trimpath -buildvcs=false -pgo=auto"
+	GOFLAGS="-trimpath -buildvcs=false -pgo=off"
 
 GO_PKG_TARGET_VARS+= \
 	CGO_LDFLAGS="$(TARGET_LDFLAGS) -static -Wl,-s" \
@@ -74,12 +75,15 @@ define Package/dae/conffiles
 /etc/config/dae
 endef
 
+# BPF 编译参数：降优化、禁用栈保护、保留帧指针
 DAE_CFLAGS:= \
-	-O2 -Wall -Werror \
+	-O2 \
+	-fno-stack-protector \
+	-fno-omit-frame-pointer \
 	-DMAX_MATCH_SET_LEN=1024 \
 	-I$(BPF_HEADERS_DIR)/tools/lib \
 	-I$(BPF_HEADERS_DIR)/arch/$(BPF_KARCH)/include/asm/mach-generic
-	
+
 define Build/Prepare
 	$(call Build/Prepare/Default)
 	[ -f "$(PGO_PROFILE)" ] && $(CP) "$(PGO_PROFILE)" "$(PKG_BUILD_DIR)/default.pgo" || true
@@ -94,8 +98,8 @@ define Build/Compile
 		$(GO_GENERAL_BUILD_CONFIG_VARS) \
 		$(GO_PKG_BUILD_CONFIG_VARS) \
 		$(GO_PKG_BUILD_VARS) \
-		BPF_CLANG="$(CLANG)" \
-		BPF_STRIP_FLAG="-strip=$(LLVM_STRIP)" \
+		BPF_CLANG="clang-19" \
+		BPF_STRIP_FLAG="-strip=llvm-strip-19" \
 		BPF_CFLAGS="$(DAE_CFLAGS)" \
 		BPF_TARGET="bpfel,bpfeb" \
 		BPF_TRACE_TARGET="$(GO_ARCH)" ; \
