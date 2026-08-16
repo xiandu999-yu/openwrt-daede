@@ -1,0 +1,11 @@
+--- a/control/kern/tproxy.c	2026-08-16 01:09:21.362727600 +0800
++++ b/control/kern/tproxy.c	2026-08-16 01:10:19.499170898 +0800
+@@ -4,7 +4,7 @@
+ // +build ignore
+ 
+ // Disable implicit CO-RE from vmlinux.h to bypass bad relocation caused by GCC 15 DTE stripping UAPI structs.
+-#define BPF_NO_PRESERVE_ACCESS_INDEX 1
++// #define BPF_NO_PRESERVE_ACCESS_INDEX 1
+ 
+ #include "headers/errno-base.h"
+ #include "headers/if_ether_defs.h"
