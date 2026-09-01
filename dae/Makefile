@@ -6,12 +6,12 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=dae
 PKG_VERSION:=2026.09.01
-PKG_RELEASE:=1
+PKG_RELEASE:=2
 
-PKG_SOURCE:=dae-src-2026.09.01-f6452e64f6a3.tar.gz
+PKG_SOURCE:=dae-src-2026.09.01-63925f253f62.tar.gz
 PKG_SOURCE_URL:=https://github.com/xiandu999-yu/openwrt-daede/releases/download/dae-src
 PKG_SOURCE_SUBDIR:=$(PKG_NAME)-$(PKG_VERSION)
-PKG_HASH:=f6452e64f6a3e76a32ff5c46aedc637c8b377b62bfc65edcc18e1cfa6d1df8cf
+PKG_HASH:=63925f253f621c051ac9588d83190143dedf97a34e951feb9d3ab3ba4a2f09b9
 
 PKG_LICENSE:=AGPL-3.0-only
 PKG_LICENSE_FILE:=LICENSE
