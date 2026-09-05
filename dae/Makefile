@@ -32,7 +32,7 @@ PATCH_DIR:=$(CURDIR)/patches_arm
 endif
 
 GO_PKG:=github.com/daeuniverse/dae
-GO_PKG_EXCLUDES:=control/kern/tests
+GO_PKG_EXCLUDES:=control/kern/tests scripts
 GO_PKG_LDFLAGS:= \
 	-s -w -buildid= \
 	-linkmode external -extldflags '-static -Wl,-s'
