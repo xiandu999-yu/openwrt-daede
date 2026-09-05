@@ -6,6 +6,7 @@
 'require ui';
 'require view';
 'require view.daede.backend as backend';
+'require view.daede.styles as styles';
 
 const MAX_LINES = 5000;
 
@@ -39,7 +40,7 @@ const CSS = [
 	'.dd-log-pane .dd-line.dd-hidden{display:none}',
 	'.dd-log-pane .dd-empty{opacity:.5;font-style:italic}',
 	/* 简化后的字段视觉 */
-	'.dd-log-pane .dd-ts{color:#6b7480;margin-right:8px}',
+	'.dd-log-pane .dd-ts{color:#6b7480;margin-right:8px;white-space:nowrap}',
 	'.dd-log-pane .dd-lvl{display:inline-block;min-width:38px;padding:0 5px;margin-right:8px;border-radius:3px;font-size:10px;font-weight:700;letter-spacing:.4px;text-align:center;vertical-align:1px}',
 	'.dd-log-pane .dd-lvl-info{color:#7fc7a8;background:rgba(127,199,168,.08)}',
 	'.dd-log-pane .dd-lvl-warn{color:#e8b95a;background:rgba(232,185,90,.10)}',
@@ -53,6 +54,8 @@ const CSS = [
 
 /* 拆字段：time="May 25 07:04:59" level=info msg="..." key=val key="val with space" ... */
 const RE_LINE = /^time="([^"]*)"\s+level=(\w+)\s+msg=(?:"((?:[^"\\]|\\.)*)"|(\S+))\s*(.*)$/;
+const RE_PREFIXED_LINE = /^\[([^\]]+)\]\s+(DEBUG|INFO|WARN(?:ING)?|ERROR|FATAL|PANIC)\s*(.*)$/i;
+const RE_PLAIN_LEVEL_LINE = /^\s*(DEBUG|INFO|WARN(?:ING)?|ERROR|FATAL|PANIC)\s+(.*)$/i;
 
 function detectLevel(line) {
 	// daed/dae logs use lvl=info / [INFO] / level=warning style
@@ -65,22 +68,29 @@ function detectLevel(line) {
 	return 'dd-error';
 }
 
-/* 简化时间戳并按北京时间显示：
+/* 格式化时间戳并按北京时间显示：
  * - daed 默认输出 UTC ISO 8601 (e.g. "2026-05-28T19:07:54Z")，转成北京时间
- * - 旧 logrus 短格式 (e.g. "May 25 07:04:59") 无时区信息，原样提取
+ * - 新格式和旧 logrus 短格式无时区信息，保留原始完整日期时间
  */
-function shortTs(raw) {
+function formatTs(raw) {
 	if (!raw) return raw;
 	if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})$/.test(raw)) {
 		const d = new Date(raw);
 		if (!isNaN(d.getTime())) {
 			const beijing = new Date(d.getTime() + 8 * 60 * 60 * 1000);
 			const pad = n => String(n).padStart(2, '0');
-			return pad(beijing.getUTCHours()) + ':' + pad(beijing.getUTCMinutes()) + ':' + pad(beijing.getUTCSeconds());
+			return [
+				beijing.getUTCFullYear(),
+				pad(beijing.getUTCMonth() + 1),
+				pad(beijing.getUTCDate())
+			].join('-') + ' ' + [
+				pad(beijing.getUTCHours()),
+				pad(beijing.getUTCMinutes()),
+				pad(beijing.getUTCSeconds())
+			].join(':');
 		}
 	}
-	const m = raw.match(/(\d{2}:\d{2}:\d{2})/);
-	return m ? m[1] : raw;
+	return raw;
 }
 
 function lvlShort(level) {
@@ -97,22 +107,49 @@ function lvlClass(level) {
 	return 'dd-lvl-error';
 }
 
+function parseLine(line) {
+	let m = line.match(RE_LINE);
+	if (m) {
+		return {
+			ts: formatTs(m[1]),
+			lvl: m[2],
+			msg: m[3] !== undefined ? m[3] : (m[4] || ''),
+			kv: (m[5] || '').trim()
+		};
+	}
+
+	m = line.match(RE_PREFIXED_LINE);
+	let ts = '', lvl = '', body = '';
+	if (m) {
+		ts = formatTs(m[1]);
+		lvl = m[2];
+		body = m[3] || '';
+	} else {
+		m = line.match(RE_PLAIN_LEVEL_LINE);
+		if (!m) return null;
+		lvl = m[1];
+		body = m[2] || '';
+	}
+	const kvStart = body.search(/(?:^|\s)(?=[A-Za-z_][\w.-]*=)/);
+	return {
+		ts: ts,
+		lvl: lvl,
+		msg: kvStart === -1 ? body : body.slice(0, kvStart).trimEnd(),
+		kv: kvStart === -1 ? '' : body.slice(kvStart).trim()
+	};
+}
+
 function buildLine(ln) {
 	const cls = detectLevel(ln);
-	const m = ln.match(RE_LINE);
-	if (!m) {
+	const parsed = parseLine(ln);
+	if (!parsed) {
 		return E('div', { 'class': 'dd-line ' + cls }, ln);
 	}
-	const ts = shortTs(m[1]);
-	const lvl = m[2];
-	const msg = m[3] !== undefined ? m[3] : (m[4] || '');
-	const kv  = (m[5] || '').trim();
-	const parts = [
-		E('span', { 'class': 'dd-ts' }, ts),
-		E('span', { 'class': 'dd-lvl ' + lvlClass(lvl) }, lvlShort(lvl)),
-		E('span', { 'class': 'dd-msg' }, msg)
-	];
-	if (kv) parts.push(E('span', { 'class': 'dd-kv' }, kv));
+	const parts = [];
+	if (parsed.ts) parts.push(E('span', { 'class': 'dd-ts' }, parsed.ts));
+	parts.push(E('span', { 'class': 'dd-lvl ' + lvlClass(parsed.lvl) }, lvlShort(parsed.lvl)));
+	parts.push(E('span', { 'class': 'dd-msg' }, parsed.msg));
+	if (parsed.kv) parts.push(E('span', { 'class': 'dd-kv' }, parsed.kv));
 	return E('div', { 'class': 'dd-line ' + cls }, parts);
 }
 
@@ -130,7 +167,8 @@ return view.extend({
 			paused: false,
 			autoScroll: true,
 			filter: '',
-			userScrolled: false
+			userScrolled: false,
+			reading: false
 		};
 
 		const pane = E('div', { 'class': 'dd-log-pane', 'id': 'dd-log-pane' }, [
@@ -145,19 +183,29 @@ return view.extend({
 
 		const meta = E('span', { 'class': 'dd-log-meta' }, '');
 
-		const cbAuto = E('input', { 'type': 'checkbox', 'checked': 'checked' });
-		cbAuto.addEventListener('change', function() {
-			state.autoScroll = cbAuto.checked;
+		const btnAuto = E('button', { 'type': 'button', 'class': 'dd-log-btn dd-log-toggle', 'id': 'dd-log-auto' });
+		const btnPause = E('button', { 'type': 'button', 'class': 'dd-log-btn dd-log-toggle', 'id': 'dd-log-pause' });
+		const syncControls = function() {
+			btnAuto.textContent = state.autoScroll ? '✓ ' + _('Auto-scroll: On') : '○ ' + _('Auto-scroll: Off');
+			btnAuto.setAttribute('aria-pressed', String(state.autoScroll));
+			btnPause.textContent = state.paused ? '▶ ' + _('Resume') : 'Ⅱ ' + _('Pause');
+			btnPause.setAttribute('aria-pressed', String(state.paused));
+			meta.textContent = state.paused ? _('Paused') : '';
+		};
+		btnAuto.addEventListener('click', function() {
+			state.autoScroll = !state.autoScroll;
 			if (state.autoScroll) {
 				pane.scrollTop = pane.scrollHeight;
 				state.userScrolled = false;
 			}
+			syncControls();
 		});
-
-		const cbPause = E('input', { 'type': 'checkbox' });
-		cbPause.addEventListener('change', function() {
-			state.paused = cbPause.checked;
+		btnPause.addEventListener('click', function() {
+			state.paused = !state.paused;
+			syncControls();
+			if (!state.paused) tick();
 		});
+		syncControls();
 
 		const selFilter = E('select', { 'class': 'dd-log-btn' }, [
 			E('option', { 'value': '' }, _('All')),
@@ -259,9 +307,11 @@ return view.extend({
 		}
 
 		function tick() {
-			if (state.paused) return Promise.resolve();
+			if (state.paused || state.reading) return Promise.resolve();
+			state.reading = true;
 
 			return fs.stat(LOG_PATH).then(function(st) {
+				if (state.paused) return;
 				const size = st.size || 0;
 				if (size === state.lastSize) {
 					meta.textContent = '%d bytes · live'.format(size);
@@ -271,6 +321,7 @@ return view.extend({
 				// File rotated/truncated → full reload
 				const rotated = size < state.lastSize;
 				return fs.read_direct(LOG_PATH, 'text').then(function(content) {
+					if (state.paused) return;
 					content = content || '';
 					let delta;
 					if (rotated || state.lastContent === '') {
@@ -295,6 +346,7 @@ return view.extend({
 						pane.scrollTop = pane.scrollHeight;
 				});
 			}).catch(function(e) {
+				if (state.paused) return;
 				const msg = String(e);
 				if (msg.indexOf('NotFoundError') !== -1 || msg.indexOf('No such') !== -1)
 					renderEmpty(_('Log file does not exist yet.'));
@@ -303,15 +355,15 @@ return view.extend({
 				state.lastSize = -1;
 				state.lastContent = '';
 				meta.textContent = '';
-			});
+			}).finally(function() { state.reading = false; });
 		}
 
 		poll.add(tick);
 		tick();
 
 		const toolbarItems = [
-			E('label', {}, [ cbAuto, _('Auto-scroll') ]),
-			E('label', {}, [ cbPause, _('Pause') ]),
+			btnAuto,
+			btnPause,
 			selFilter,
 			btnClear,
 			btnDownload,
@@ -322,7 +374,7 @@ return view.extend({
 		const toolbar = E('div', { 'class': 'dd-log-toolbar' }, toolbarItems);
 
 		return E('div', { 'class': 'dd-log-wrap' }, [
-			E('style', {}, CSS),
+			E('style', {}, CSS + styles.CSS),
 			E('div', { 'class': 'dd-log-card' }, [
 				E('h4', { 'class': 'dd-log-card-title' }, _('%s Realtime Log').format(ctx.name)),
 				toolbar,
