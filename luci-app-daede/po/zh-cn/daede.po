@@ -372,6 +372,9 @@ msgstr "dae 热重载可用"
 msgid "netns daens removed."
 msgstr "netns daens 已清理。"
 
+msgid "in use by daed"
+msgstr "daed 运行中，正在使用"
+
 msgid "exists, may block daed start"
 msgstr "已存在，可能阻碍 daed 启动"
 
@@ -662,6 +665,12 @@ msgstr "代理流量"
 
 msgid "Logging"
 msgstr "日志"
+
+msgid "Log level"
+msgstr "日志级别"
+
+msgid "Debug and trace show per-connection routing details, but increase CPU usage and log volume. Enable them only while troubleshooting."
+msgstr "Debug 和 Trace 会显示逐连接的分流详情，但会增加 CPU 占用和日志量，仅建议排障时启用。"
 
 msgid "Save manual config"
 msgstr "保存手动配置"
@@ -1003,6 +1012,12 @@ msgstr "正在导入节点组…"
 
 msgid "Node group imported: added %d, reused %d, failed %d"
 msgstr "节点组导入完成：新增 %d，复用 %d，失败 %d"
+
+msgid "Completed with warning: %s"
+msgstr "已完成，但有警告：%s"
+
+msgid "Managed subscription no longer exists in daed"
+msgstr "daed 中已不存在该托管订阅"
 
 msgid "Node group import failed: %s"
 msgstr "节点组导入失败：%s"

@@ -45,6 +45,7 @@ const DEFAULT_TEMPLATE =
 	'    }\n' +
 	'    routing {\n' +
 	'        request {\n' +
+	'            qname(suffix:googleapis.cn) -> fallbackdns\n' +
 	'            qname(geosite:cn) -> cndns\n' +
 	'            fallback: fallbackdns\n' +
 	'        }\n' +
@@ -70,6 +71,7 @@ const DEFAULT_TEMPLATE =
 	'    l4proto(udp) && dport(123) -> direct\n' +
 	'    domain(connectivitycheck.gstatic.com) -> direct\n' +
 	'    domain(msftconnecttest.com) -> direct\n' +
+	'    domain(suffix:googleapis.cn) -> proxy\n' +
 	'    dip(geoip:cn) -> direct\n' +
 	'    domain(geosite:cn) -> direct\n' +
 	'    fallback: proxy\n' +
@@ -336,6 +338,15 @@ function renderDaeForms(ctx) {
 
 	s = m.section(form.NamedSection, 'config', 'dae', _('Logging'));
 	s.addremove = false;
+	o = s.option(form.ListValue, 'log_level', _('Log level'),
+		_('Debug and trace show per-connection routing details, but increase CPU usage and log volume. Enable them only while troubleshooting.'));
+	o.value('error', 'ERROR');
+	o.value('warn', 'WARN');
+	o.value('info', 'INFO');
+	o.value('debug', 'DEBUG');
+	o.value('trace', 'TRACE');
+	o.default = 'info';
+	o.rmempty = false;
 	o = s.option(form.Value, 'log_maxsize', _('Max Log Size (MB)'),
 		_('Rotate the log file once it grows past this many megabytes.'));
 	o.datatype = 'uinteger';
@@ -695,7 +706,7 @@ function renderDaeEditor() {
 		save.disabled = true;
 		flashStatus(_('Validating…'));
 		fs.write(VALIDATE_PATH, textarea.value, 384)
-			.then(function() { return fs.exec('/usr/bin/dae', ['validate', '-c', VALIDATE_PATH]); })
+			.then(function() { return fs.exec('/usr/bin/env', ['DAE_LOCATION_ASSET=/usr/share/v2ray', '/usr/bin/dae', 'validate', '-c', VALIDATE_PATH]); })
 			.then(function(res) {
 				if (res && res.code !== 0) {
 					const err = (res.stderr || res.stdout || ('exit ' + res.code)).trim().split('\n')[0];
