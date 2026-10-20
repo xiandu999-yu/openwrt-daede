@@ -11,23 +11,35 @@ TMP_DIR="/tmp/daede-install"
 # and is the default the LuCI app expects. Override with DAEDE_CORE=dae|daed|both.
 DAEDE_CORE="${DAEDE_CORE:-daed}"
 
-fetch_text() {
+# Capture each attempt so a failed curl cannot prepend a partial response to wget.
+# Keep tool errors on stderr: HTTP status, TLS and DNS errors matter for diagnosis.
+fetch_text() (
   url="$1"
   if command -v curl >/dev/null 2>&1; then
-    curl -fsSL "$url" 2>/dev/null
-    return $?
+    if response="$(curl -fsSL "$url")"; then
+      printf '%s\n' "$response"
+      return 0
+    fi
+    echo "[WARN] curl failed for $url; trying wget." >&2
   fi
-  wget -qO- "$url" 2>/dev/null
-}
+  if command -v wget >/dev/null 2>&1; then
+    if response="$(wget -O- "$url")"; then
+      printf '%s\n' "$response"
+      return 0
+    fi
+  fi
+  echo "[WARN] Fetch failed: $url" >&2
+  return 1
+)
 
 download_file() {
   url="$1"
   out="$2"
   if command -v curl >/dev/null 2>&1; then
-    curl -fL "$url" -o "$out"
-    return $?
+    if curl -fL "$url" -o "$out"; then return 0; fi
+    echo "[WARN] curl failed for $url; trying wget." >&2
   fi
-  wget -qO "$out" "$url"
+  wget -O "$out" "$url"
 }
 
 download_url() {
@@ -181,7 +193,10 @@ resolve_from_manifest() {
   for fb in $(feed_bases); do
     base="$(feed_base_for "$fb" "$sdk" "$arch")"
     MANIFEST_TEXT="$(fetch_text "${base}/manifest-daede.txt" || true)"
-    [ -n "$MANIFEST_TEXT" ] || continue
+    if [ -z "$MANIFEST_TEXT" ]; then
+      echo "[WARN] Feed manifest unavailable or empty: ${base}/manifest-daede.txt" >&2
+      continue
+    fi
 
     plan=""
     ok=1
@@ -209,14 +224,88 @@ resolve_from_manifest() {
   return 1
 }
 
+# Read the IPK index without passing compressed bytes through shell variables.
+load_opkg_index() (
+  index_tmp="$(mktemp /tmp/daede-index.XXXXXX)" || return 1
+  trap 'rm -f "$index_tmp"' EXIT
+  download_file "$1/Packages.gz" "$index_tmp" >&2 || return 1
+  gzip -dc "$index_tmp"
+)
+
+# Match whole control fields, including architecture; never select a similarly
+# named package or a different target. Return filename and checksum together.
+find_opkg_entry() {
+  awk -v wanted="$1" -v target="$2" '
+    BEGIN { RS = ""; FS = "\n" }
+    {
+      package = arch = filename = sha = ""
+      for (i = 1; i <= NF; i++) {
+        line = $i
+        sub(/\r$/, "", line)
+        if (line ~ /^Package: /) { sub(/^Package: */, "", line); package = line }
+        else if (line ~ /^Architecture: /) { sub(/^Architecture: */, "", line); arch = line }
+        else if (line ~ /^Filename: /) { sub(/^Filename: */, "", line); filename = line }
+        else if (line ~ /^SHA256sum: /) { sub(/^SHA256sum: */, "", line); sha = line }
+      }
+      if (package == wanted && (arch == target || arch == "all") &&
+          filename ~ /\.ipk$/ && length(sha) == 64 && sha !~ /[^0-9a-fA-F]/) {
+        print filename "|" tolower(sha)
+        exit
+      }
+    }
+  '
+}
+
+resolve_from_opkg_index() {
+  [ "$PM" = "opkg" ] || return 1
+  for index_fb in $(feed_bases); do
+    index_base="$(feed_base_for "$index_fb" "$1" "$2")"
+    index_text="$(load_opkg_index "$index_base")" || {
+      echo "[WARN] IPK index unavailable or invalid: ${index_base}/Packages.gz" >&2
+      continue
+    }
+    index_plan=""
+    index_ok=1
+    for index_pkg in $(wanted_pkgs); do
+      index_entry="$(printf '%s\n' "$index_text" | find_opkg_entry "$index_pkg" "$2")"
+      if [ -z "$index_entry" ]; then
+        echo "[WARN] IPK index has no checksummed '$index_pkg' for $1/$2" >&2
+        index_ok=0
+        break
+      fi
+      index_file="${index_entry%%|*}"
+      index_sha="${index_entry#*|}"
+      # OpenWrt indexes normally use a basename or ./basename.
+      case "$index_file" in
+        ./*) index_file="${index_file#./}" ;;
+      esac
+      case "$index_file" in
+        */*|*'|'*) index_ok=0; break ;;
+      esac
+      index_plan="${index_plan}${index_pkg}|${index_base}/${index_file}|${index_sha}
+"
+    done
+    [ "$index_ok" = 1 ] || continue
+    PLAN="$index_plan"
+    return 0
+  done
+  return 1
+}
+
 # GitHub release fallback (best effort, no sha256 available there).
 resolve_from_github() {
   arch="$1"
   ext="$2"
   payload="$(fetch_text "$GITHUB_API_URL" || true)"
-  [ -n "$payload" ] || return 1
-  urls="$(printf '%s\n' "$payload" | sed -n 's/.*"browser_download_url":[[:space:]]*"\([^"]*\)".*/\1/p')"
-  [ -n "$urls" ] || return 1
+  if [ -z "$payload" ]; then
+    echo "[WARN] GitHub API unavailable or empty: $GITHUB_API_URL" >&2
+    return 1
+  fi
+  urls="$(printf '%s\n' "$payload" | grep -oE '"browser_download_url":[[:space:]]*"[^"]*"' | sed -n 's/"browser_download_url":[[:space:]]*"\([^"]*\)"/\1/p')"
+  if [ -z "$urls" ]; then
+    echo "[WARN] GitHub API returned no release download URLs: $GITHUB_API_URL" >&2
+    return 1
+  fi
 
   plan=""
   for pkg in $(wanted_pkgs); do
@@ -301,11 +390,20 @@ SDK="$(detect_sdk || true)"
 # Try the exact arch first, then the generic fallback (e.g. cortex-a76 -> generic).
 RESOLVED_ARCH=""
 RESOLVED_SDK=""
-for sdk_try in $(package_sdks "$SDK"); do
+# Keep SDK selection limited to the detected version and the QWRT IPK exception.
+# An older SDK is not automatically ABI-compatible.
+SDK_CANDIDATES="$(package_sdks "$SDK")"
+for sdk_try in $SDK_CANDIDATES; do
   for a in "$ARCH" $(fallback_arch "$ARCH" || true); do
+    feed_source=""
     if resolve_from_manifest "$sdk_try" "$a"; then
+      feed_source="manifest"
+    elif resolve_from_opkg_index "$sdk_try" "$a"; then
+      feed_source="Packages.gz"
+    fi
+    if [ -n "$feed_source" ]; then
       [ "$sdk_try" = "$SDK" ] || echo "Device reports SDK ${SDK:-?}; using ${sdk_try} ${EXT} feed for ${PM}."
-      echo "Using R2 feed manifest: ${sdk_try}/${a}"
+      echo "Using R2 feed $feed_source: ${sdk_try}/${a}"
       RESOLVED_ARCH="$a"
       RESOLVED_SDK="$sdk_try"
       break 2
@@ -320,7 +418,7 @@ if [ -z "$RESOLVED_ARCH" ]; then
     fi
   done
 fi
-[ -n "$RESOLVED_ARCH" ] || { echo "Cannot resolve daede packages for arch: $ARCH"; exit 1; }
+[ -n "$RESOLVED_ARCH" ] || { echo "Cannot resolve daede packages: PM=$PM SDK=${SDK:-unknown} arch=$ARCH; attempted SDKs: $(printf '%s' "$SDK_CANDIDATES" | tr '\n' ' ')" >&2; exit 1; }
 [ "$RESOLVED_ARCH" = "$ARCH" ] || echo "No ${ARCH} feed; using ${RESOLVED_ARCH} (ABI-compatible)."
 # apk rejects packages whose arch is not listed in /etc/apk/arch; register fallback arch
 if [ "$PM" = "apk" ] && [ "$RESOLVED_ARCH" != "$ARCH" ]; then
@@ -375,6 +473,14 @@ else
   echo "[WARN] vmlinux-btf not found in feed for ${GEO_SDK:-?}/${RESOLVED_ARCH}; install may fail on the BTF dependency."
 fi
 
+# Refresh the device's own package index first so kmod-* / geodata deps resolve;
+# failure is non-fatal (deps may already be cached or reachable).
+if [ "$PM" = "opkg" ]; then
+  opkg update || echo "[WARN] opkg update failed, dependency resolution may break"
+else
+  apk update || echo "[WARN] apk update failed, dependency resolution may break"
+fi
+
 echo "Installing (core first, then LuCI)..."
 _install_rc=0
 if [ "$PM" = "opkg" ]; then
@@ -386,25 +492,33 @@ else
   apk add --allow-untrusted $FILES || _install_rc=$?
 fi
 
-if [ "$_install_rc" -ne 0 ]; then
-  echo "[ERROR] Package install failed (exit $_install_rc). daed/dae was NOT installed."
+# opkg/apk can exit 0 yet skip the core package on a dependency hiccup (issue #30),
+# or exit non-zero on an unrelated package conflict (e.g. argon i18n file
+# ownership) while the core actually landed. Judge by the core binary, not the
+# exit code alone.
+core_missing=0
+case "$DAEDE_CORE" in
+  daed|both) [ -x /usr/bin/daed ] || core_missing=1 ;;
+esac
+case "$DAEDE_CORE" in
+  dae|both) [ -x /usr/bin/dae ] || core_missing=1 ;;
+esac
+
+if [ "$core_missing" -eq 1 ]; then
+  if [ "$_install_rc" -ne 0 ]; then
+    echo "[ERROR] Package install failed (exit $_install_rc) and the core binary is missing."
+  else
+    echo "[ERROR] Install finished but the core binary is missing — a dependency was likely skipped."
+  fi
   echo "        Most common cause: unmet dependencies (v2ray-geoip / v2ray-geosite / kmod-*)."
   echo "        Run '$PM update' first, ensure those deps are reachable, then retry."
-  exit "$_install_rc"
+  exit 1
 fi
 
-# opkg/apk can exit 0 yet skip the core package on a dependency hiccup, leaving
-# no /usr/bin/daed while still printing success (issue #30). Verify it landed.
-case "$DAEDE_CORE" in
-  daed|both)
-    [ -x /usr/bin/daed ] || { echo "[ERROR] Install finished but /usr/bin/daed is missing — a dependency was likely skipped; check the 'opkg install' output above."; exit 1; }
-    ;;
-esac
-case "$DAEDE_CORE" in
-  dae|both)
-    [ -x /usr/bin/dae ] || { echo "[ERROR] Install finished but /usr/bin/dae is missing — a dependency was likely skipped; check the 'opkg install' output above."; exit 1; }
-    ;;
-esac
+if [ "$_install_rc" -ne 0 ]; then
+  echo "[WARN] '$PM' reported an error (exit $_install_rc) but the core binary is present;"
+  echo "       the error likely comes from an unrelated package conflict. Continuing."
+fi
 
 echo "Install complete."
 
