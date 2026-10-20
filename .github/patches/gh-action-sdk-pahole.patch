@@ -1,0 +1,30 @@
+--- a/Dockerfile
++++ b/Dockerfile
+@@ -4,6 +4,27 @@ FROM $CONTAINER:$ARCH
+ 
+ LABEL "com.github.actions.name"="OpenWrt SDK"
+ 
++# Bullseye SDK images still point at retired security packages.
++RUN if grep -q bullseye /etc/os-release; then \
++      sudo sed -i 's|http://deb.debian.org/debian-security|https://snapshot.debian.org/archive/debian-security/20260903T220410Z|g' /etc/apt/sources.list; \
++    fi && \
++    sudo apt-get -o Acquire::Check-Valid-Until=false update -qq && \
++    sudo apt-get install -y --no-install-recommends cmake libdw-dev libelf-dev zlib1g-dev && \
++    sudo apt-get clean && \
++    sudo rm -rf /var/lib/apt/lists/* && \
++    curl -fsSL --retry 3 \
++      https://fedorapeople.org/~acme/dwarves/dwarves-1.28.tar.bz2 \
++      -o /tmp/dwarves-1.28.tar.bz2 && \
++    echo '826efc0fc9237d3c1e9c01553ea387a8cb46e8dc119ff863889043f4ed54b2ae  /tmp/dwarves-1.28.tar.bz2' | sha256sum -c - && \
++    tar -xjf /tmp/dwarves-1.28.tar.bz2 -C /tmp && \
++    cmake -S /tmp/dwarves-1.28 -B /tmp/dwarves-build \
++      -D__LIB=lib -DCMAKE_BUILD_TYPE=Release && \
++    cmake --build /tmp/dwarves-build -j "$(nproc)" && \
++    sudo cmake --install /tmp/dwarves-build && \
++    sudo ldconfig && \
++    pahole --version && \
++    test "$(pahole --version)" = v1.28
++
+ ADD entrypoint.sh /
+ 
+ ENTRYPOINT ["/entrypoint.sh"]
