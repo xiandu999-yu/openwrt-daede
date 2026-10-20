@@ -1,0 +1,37 @@
+name: Audit upstream pins
+
+# 独立审计：核对 candidate SHA 的 pins.env 与 Makefile 一致、
+# 补丁清单未变、补丁未被上游吸收等。结论即 job 结论，
+# promote 通过 API 核对（workflow、run、attempt、job、headSha）。
+# 必须用 --ref candidate/<SHA>（tag）触发，并传 sha 输入。
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: 'Candidate SHA to audit (must match the candidate tag)'
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: Audit upstream pins
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # 审计必须发生在 candidate SHA 上，而不是触发 ref 的最新提交。
+          ref: ${{ inputs.sha }}
+          fetch-depth: 0
+
+      - name: Run upstream audit
+        run: |
+          echo "Auditing candidate SHA: ${{ inputs.sha }}"
+          git rev-parse HEAD
+          [ "$(git rev-parse HEAD)" = "${{ inputs.sha }}" ] || {
+            echo "::error::checked out $(git rev-parse HEAD), expected ${{ inputs.sha }}"
+            exit 1
+          }
+          bash scripts/audit-upstream.sh "$PWD"

@@ -1,0 +1,66 @@
+name: Prune old releases
+
+# 独立定时清理，与发布流程完全解耦。
+# 清理失败不影响任何发布（独立 run，独立失败域）。
+# 故意不在发布脚本主流程内：清理失败不该让一次已经完成的发布变红。
+on:
+  schedule:
+    # 每周日 03:00 UTC，错开 auto-bump 的同步时段
+    - cron: '0 3 * * 0'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  prune:
+    name: Prune old releases and candidate tags
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Prune old v* releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # 只清理版本 release（v*）；dae-src / daed-src 等 pin 源 release 永不清理
+          gh release list -R "$REPO" --limit 100 --json tagName,createdAt \
+            --jq '[.[] | select(.tagName | startswith("v"))] | sort_by(.createdAt) | reverse | .[6:] | .[].tagName' > old_tags.txt
+          if [ ! -s old_tags.txt ]; then
+            echo "Releases <= 6, nothing to prune."
+          else
+            while read -r tag; do
+              [ -n "$tag" ] || continue
+              echo "Deleting release & tag: $tag"
+              gh release delete "$tag" -R "$REPO" --yes --cleanup-tag
+            done < old_tags.txt
+          fi
+
+      - name: Prune stale candidate tags
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # candidate/<SHA> 是 gate 冻结候选的临时 tag；promote 成功后会删，
+          # 这里清理失败/残留超过 7 天的。tag 只是指针，提交本身不受影响；
+          # 且晋升校验只认 SHA（API 核对），不认 tag 存在。
+          cutoff=$(date -d '7 days ago' +%s)
+          git -c credential.helper='!gh auth git-credential' \
+            fetch -q origin 'refs/tags/candidate/*:refs/tags/candidate/*' || true
+          for tag in $(git tag -l 'candidate/*'); do
+            sha=$(git rev-parse "$tag" 2>/dev/null || true)
+            [ -n "$sha" ] || continue
+            ctime=$(git log -1 --format=%ct "$sha" 2>/dev/null || echo 0)
+            if [ "$ctime" -lt "$cutoff" ]; then
+              echo "Deleting stale candidate tag: $tag ($sha)"
+              git -c credential.helper='!gh auth git-credential' \
+                push origin --delete "refs/tags/$tag" 2>/dev/null \
+                || echo "warning: cannot delete $tag"
+            fi
+          done
+          echo "candidate tag cleanup done"

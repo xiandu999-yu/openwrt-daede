@@ -1,18 +1,21 @@
-name: Build & Release
+name: Build candidate matrix
 
+# 纯构建矩阵，不发布。发布唯一入口是 promote-candidate.yml。
+# 必须用 --ref candidate/<SHA>（tag）触发，并传 sha 输入；
+# 构建 checkout 该 SHA，保证"验证的是哪个 SHA"可查。
 on:
-  push:
-    tags:
-      - 'v*'
   workflow_dispatch:
     inputs:
-      prerelease:
-        description: '标记为预发布版本'
-        type: boolean
-        default: true
+      sha:
+        description: 'Candidate SHA to build and verify (must match the candidate tag)'
+        type: string
+        required: true
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+permissions:
+  contents: read
 
 jobs:
   build:
@@ -36,6 +39,20 @@ jobs:
 
     steps:
       - uses: actions/checkout@v6
+        with:
+          # 构建必须发生在 candidate SHA 上，而不是触发 ref 的最新提交。
+          ref: ${{ inputs.sha }}
+
+      - name: Prepare SDK action with pahole
+        uses: actions/checkout@v6
+        with:
+          repository: kenzok8/gh-action-sdk
+          ref: 44f98c51d04aebd1aa79fe4f603559c1ec2085da
+          path: .github/actions/gh-action-sdk
+          persist-credentials: false
+
+      - name: Add pahole to SDK image
+        run: git -C .github/actions/gh-action-sdk apply "$GITHUB_WORKSPACE/.github/patches/gh-action-sdk-pahole.patch"
 
       # Heavy dae/daed + Go toolchain builds can exhaust the runner's ~14GB.
       # Drop preinstalled toolchains we never use to reclaim ~25GB and avoid
@@ -49,7 +66,9 @@ jobs:
           df -h /
 
       - name: Build packages
-        uses: kenzok8/gh-action-sdk@hash
+        id: sdk
+        continue-on-error: true
+        uses: ./.github/actions/gh-action-sdk
         env:
           CONTAINER: immortalwrt/sdk
           ARCH: ${{ matrix.arch }}-openwrt-${{ matrix.sdk }}
@@ -58,13 +77,44 @@ jobs:
           # wall supplies v2ray-geoip / v2ray-geosite (subpackages of v2ray-geodata)
           EXTRA_FEEDS: src-git|wall|https://github.com/kenzok8/wall
           NO_REFRESH_CHECK: true
-          IGNORE_ERRORS: true
+          IGNORE_ERRORS: false
           INDEX: 1
-          KEY_BUILD: ${{ secrets.OPKG_KEY_BUILD }}
-          PRIVATE_KEY: ${{ secrets.APK_PRIVATE_KEY }}
+          # Candidate builds use disposable SDK index keys. The unified feed
+          # signs its own indexes after the exact package bytes pass validation.
+          # 此 workflow 只做候选构建，永不带发布密钥签名。
+          KEY_BUILD: ''
+          PRIVATE_KEY: ''
           # dae / daed go.mod requires Go 1.26; override SDK's bundled golang.
           GOLANG_REPO: https://github.com/kenzok8/golang
           GOLANG_BRANCH: '1.26'
+
+      - name: Require all release packages
+        if: always()
+        env:
+          SDK_OUTCOME: ${{ steps.sdk.outcome }}
+        run: |
+          set -euo pipefail
+          [ "$SDK_OUTCOME" = success ] || {
+            echo "::error::SDK action concluded $SDK_OUTCOME"
+            exit 1
+          }
+          output_dir="bin/packages/${{ matrix.arch }}/daede"
+          for package in dae daed luci-app-daede vmlinux-btf; do
+            found=0
+            while IFS= read -r -d '' file; do
+              name=${file##*/}
+              case "$name" in
+                "$package"-*.apk|"$package"_*.apk|"$package"-*.ipk|"$package"_*.ipk)
+                  found=1
+                  break
+                  ;;
+              esac
+            done < <(find "$output_dir" -maxdepth 1 -type f \( -name '*.apk' -o -name '*.ipk' \) -print0 2>/dev/null || true)
+            [ "$found" -eq 1 ] || {
+              echo "::error::$package has no package for ${{ matrix.arch }} SDK ${{ matrix.sdk }}"
+              exit 1
+            }
+          done
 
       - name: Collect packages
         run: |
@@ -105,172 +155,18 @@ jobs:
         with:
           name: packages-sdk${{ matrix.sdk }}-${{ matrix.arch }}
           path: dist/
+          if-no-files-found: error
+
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: logs-sdk${{ matrix.sdk }}-${{ matrix.arch }}
+          path: |
+            logs/**
+            *.log
+            **/*.log
           if-no-files-found: ignore
-
-  release:
-    name: Create Release
-    needs: [build, verify]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-
-      - name: Download artifacts
-        uses: actions/download-artifact@v6
-        with:
-          path: all-artifacts
-          pattern: packages-*
-
-      - name: Flatten release files
-        run: |
-          mkdir -p dist
-          find all-artifacts -path "*/release/*" -type f -exec cp -v {} dist/ \;
-
-      - name: Determine tag
-        id: meta
-        run: |
-          if [ "${{ github.event_name }}" = "push" ]; then
-            echo "tag=${{ github.ref_name }}" >> $GITHUB_OUTPUT
-            echo "prerelease=false" >> $GITHUB_OUTPUT
-          else
-            echo "tag=v$(date -u +%Y.%m.%d)" >> $GITHUB_OUTPUT
-            echo "prerelease=${{ github.event.inputs.prerelease }}" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Generate Release Notes
-        env:
-          TAG: ${{ steps.meta.outputs.tag }}
-          REPO: ${{ github.repository }}
-        run: |
-          BASE="https://github.com/${REPO}/releases/download/${TAG}"
-          ARCHS="aarch64_cortex-a53 aarch64_cortex-a72 aarch64_generic arm_cortex-a7_neon-vfpv4 arm_cortex-a9 arm_cortex-a9_neon i386_pentium4 x86_64"
-          PREVIOUS_TAG="$(git tag --sort=-creatordate | grep '^v' | grep -v "^${TAG}$" | head -1 || true)"
-
-          if [ -n "$PREVIOUS_TAG" ]; then
-            RANGE="${PREVIOUS_TAG}..HEAD"
-          else
-            RANGE="HEAD"
-          fi
-
-          git log --format='%s%x1f%b%x1e' "$RANGE" > commits.raw
-
-          write_section() {
-            title="$1"
-            pattern="$2"
-            awk -v title="$title" -v pattern="$pattern" '
-              BEGIN { RS = "\036"; FS = "\037"; count = 0 }
-              {
-                subject = $1; body = $2
-                gsub(/^[[:space:]]+|[[:space:]]+$/, "", subject)
-                if (subject == "" || subject ~ /^Merge /) next
-                if (subject ~ pattern) {
-                  item = subject
-                  sub(/^[a-z]+([(][^)]+[)])?!?:[[:space:]]*/, "", item)
-                  issue = ""
-                  text = subject "\n" body
-                  if (match(text, /(([Ff]ixes|[Cc]loses|[Rr]esolves|[Rr]efs)[[:space:]]+#[0-9]+)/))
-                    issue = " (" substr(text, RSTART, RLENGTH) ")"
-                  else if (match(text, /#[0-9]+/))
-                    issue = " (" substr(text, RSTART, RLENGTH) ")"
-                  lines[++count] = "- " item issue
-                }
-              }
-              END {
-                if (count > 0) { print "## " title; print ""; for (i = 1; i <= count; i++) print lines[i]; print "" }
-              }
-            ' commits.raw
-          }
-
-          {
-            echo "# openwrt-daede ${TAG}"
-            echo ""
-            if [ -n "$PREVIOUS_TAG" ]; then
-              echo "_Changes since ${PREVIOUS_TAG} / 自 ${PREVIOUS_TAG} 以来的更新。_"
-            else
-              echo "_Initial release notes / 初始发布说明。_"
-            fi
-            echo ""
-            write_section "New Features / 新功能" '^feat([(][^)]+[)])?!?:'
-            write_section "Improvements / 改进" '^(perf|refactor)([(][^)]+[)])?!?:'
-            write_section "Bug Fixes / 问题修复" '^fix([(][^)]+[)])?!?:'
-            write_section "Build & Release / 构建与发布" '^(ci|build)([(][^)]+[)])?!?:'
-            write_section "Documentation / 文档" '^docs([(][^)]+[)])?!?:'
-            write_section "Maintenance / 维护" '^(chore|test)([(][^)]+[)])?!?:'
-
-            echo "## Packages / 安装包"
-            echo ""
-            cell_ipk() {
-              pkg="$1"; arch="$2"; fallback="$3"
-              f=$(ls dist/${pkg}_*_${arch}.ipk 2>/dev/null | head -1)
-              [ -n "$f" ] && echo "[$(basename $f)](${BASE}/$(basename $f))" || echo "$fallback"
-            }
-            cell_apk() {
-              pkg="$1"; arch="$2"
-              f=$(ls dist/${pkg}-*-${arch}.apk 2>/dev/null | head -1)
-              [ -n "$f" ] && echo "[$(basename $f)](${BASE}/$(basename $f))" || echo "—"
-            }
-            noarch_ipk() {
-              pkg="$1"
-              f=$(ls dist/${pkg}_*_all.ipk 2>/dev/null | head -1)
-              [ -n "$f" ] && echo "[$(basename $f)](${BASE}/$(basename $f))" || echo "—"
-            }
-
-            echo "## 📦 SDK 24.10 · 稳定版 (IPK)"
-            echo ""
-            echo "| 架构 | dae | daed | luci-app-daede |"
-            echo "| :--- | :--- | :--- | :--- |"
-            luci_fallback=$(noarch_ipk luci-app-daede)
-            for arch in $ARCHS; do
-              echo "| \`${arch}\` | $(cell_ipk dae $arch —) | $(cell_ipk daed $arch —) | $(cell_ipk luci-app-daede $arch "$luci_fallback") |"
-            done
-
-            echo ""
-            echo "## 📦 SDK 25.12 · 稳定版 (APK)"
-            echo ""
-            echo "| 架构 | dae | daed | luci-app-daede |"
-            echo "| :--- | :--- | :--- | :--- |"
-            for arch in $ARCHS; do
-              echo "| \`${arch}\` | $(cell_apk dae $arch) | $(cell_apk daed $arch) | $(cell_apk luci-app-daede $arch) |"
-            done
-          } > release_notes.md
-
-          cat release_notes.md
-
-      - name: Publish Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.meta.outputs.tag }}
-          target_commitish: ${{ github.sha }}
-          name: Release ${{ steps.meta.outputs.tag }}
-          body_path: release_notes.md
-          prerelease: ${{ steps.meta.outputs.prerelease }}
-          make_latest: ${{ steps.meta.outputs.prerelease == 'false' }}
-          files: dist/**
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Prune old releases
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-        run: |
-          # only prune version releases (v*); never the pinned-source releases
-          # (dae-src / daed-src) the packages download their tarballs from
-          gh release list -R "$REPO" --limit 100 --json tagName,createdAt \
-            --jq '[.[] | select(.tagName | startswith("v"))] | sort_by(.createdAt) | reverse | .[6:] | .[].tagName' > old_tags.txt
-          if [ ! -s old_tags.txt ]; then
-            echo "Releases <= 6, nothing to prune."
-            exit 0
-          fi
-          while read -r tag; do
-            [ -n "$tag" ] || continue
-            echo "Deleting release & tag: $tag"
-            gh release delete "$tag" -R "$REPO" --yes --cleanup-tag
-          done < old_tags.txt
 
   verify:
     name: Verify built packages
@@ -283,14 +179,14 @@ jobs:
           path: artifacts
           pattern: packages-*
 
-      - name: Require dae/daed on supported targets
+      - name: Require all packages on supported targets
         run: |
           set -eu
           fail=0
           for sdk in 24.10 25.12; do
             for arch in aarch64_cortex-a53 aarch64_cortex-a72 aarch64_generic arm_cortex-a7_neon-vfpv4 arm_cortex-a9 arm_cortex-a9_neon i386_pentium4 x86_64; do
               dir="artifacts/packages-sdk${sdk}-${arch}/feed"
-              for pkg in dae daed; do
+              for pkg in dae daed luci-app-daede vmlinux-btf; do
                 if ls "$dir"/${pkg}_*.ipk >/dev/null 2>&1 || ls "$dir"/${pkg}-*.apk >/dev/null 2>&1; then
                   :
                 else
@@ -300,100 +196,4 @@ jobs:
             done
           done
           [ "$fail" -eq 0 ] || { echo "verify failed; feed will not be published"; exit 1; }
-          echo "all required dae/daed packages present"
-
-  upload_feed:
-    name: Upload Feed to B2
-    needs: [build, verify]
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Download artifacts
-        uses: actions/download-artifact@v6
-        with:
-          path: artifacts
-          pattern: packages-*
-
-      - name: Organize feed structure
-        run: |
-          mkdir -p feed
-          for dir in artifacts/packages-sdk*; do
-            [ -d "$dir/feed" ] || continue
-            name=$(basename "$dir")
-            sdk=$(echo "$name" | sed 's/packages-sdk\([^-]*\)-.*/\1/')
-            arch=$(echo "$name" | sed 's/packages-sdk[^-]*-//')
-            target="feed/${sdk}/${arch}"
-            mkdir -p "$target"
-            cp -v "$dir/feed/"* "$target/" 2>/dev/null || true
-
-            manifest=""
-            for pkg in dae daed luci-app-daede; do
-              if ls "$target"/${pkg}_*.ipk >/dev/null 2>&1; then
-                f=$(basename "$(ls "$target"/${pkg}_*.ipk | sort -V | tail -1)")
-              elif ls "$target"/${pkg}-*.apk >/dev/null 2>&1; then
-                f=$(basename "$(ls "$target"/${pkg}-*.apk | sort -V | tail -1)")
-              else
-                f=""
-              fi
-              if [ -n "$f" ]; then
-                sha=$(sha256sum "$target/$f" | awk '{print $1}')
-                manifest="${manifest}${pkg}=${f}"$'\n'"${pkg}_sha256=${sha}"$'\n'
-              fi
-            done
-            [ -n "$manifest" ] && printf '%s' "$manifest" > "$target/manifest-daede.txt"
-          done
-          find feed -type f | sort
-
-      # Install rclone in its own step that holds NO secrets, so a tampered
-      # download can never read the B2 keys. Pinned version + checksum verify.
-      - name: Install rclone (pinned)
-        env:
-          RCLONE_VER: "1.69.1"
-        run: |
-          set -eu
-          zip="rclone-v${RCLONE_VER}-linux-amd64.zip"
-          base="https://downloads.rclone.org/v${RCLONE_VER}"
-          curl -fsSL -o "$zip" "${base}/${zip}"
-          # Verify against the checksum published in the pinned release's SHA256SUMS.
-          curl -fsSL -o SHA256SUMS "${base}/SHA256SUMS"
-          grep " ${zip}$" SHA256SUMS | sha256sum -c -
-          unzip -q "$zip"
-          sudo install -m 0755 "rclone-v${RCLONE_VER}-linux-amd64/rclone" /usr/local/bin/rclone
-          rclone version
-
-      - name: Upload to Cloudflare R2
-        env:
-          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
-          R2_BUCKET: ${{ secrets.R2_BUCKET }}
-        run: |
-          [ -z "$R2_ACCESS_KEY_ID" ] && { echo "No R2 credentials, skipping"; exit 0; }
-          mkdir -p ~/.config/rclone
-          cat > ~/.config/rclone/rclone.conf <<EOF
-          [r2]
-          type = s3
-          provider = Cloudflare
-          access_key_id = ${R2_ACCESS_KEY_ID}
-          secret_access_key = ${R2_SECRET_ACCESS_KEY}
-          endpoint = ${R2_ENDPOINT}
-          acl = private
-          no_check_bucket = true
-          EOF
-          find feed -type f | grep -q . || { echo "feed empty, skip sync"; exit 0; }
-          rclone sync feed/ "r2:${R2_BUCKET}/openwrt-feed/daed/" \
-            --checksum \
-            --fast-list \
-            --transfers 8 \
-            --checkers 16
-
-      - name: Trigger unified feed aggregation
-        env:
-          AGGREGATE_FEED_TOKEN: ${{ secrets.AGGREGATE_FEED_TOKEN }}
-        run: |
-          [ -z "$AGGREGATE_FEED_TOKEN" ] && { echo "No aggregate token, skip trigger"; exit 0; }
-          curl -fsSL -X POST \
-            -H "Authorization: Bearer ${AGGREGATE_FEED_TOKEN}" \
-            -H "Accept: application/vnd.github+json" \
-            https://api.github.com/repos/kenzok8/openwrt-clashoo/actions/workflows/aggregate-feed.yml/dispatches \
-            -d '{"ref":"main"}' || echo "Aggregate trigger failed; scheduled workflow will retry."
+          echo "all required release packages present"

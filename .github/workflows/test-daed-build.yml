@@ -1,14 +1,43 @@
 name: Test daed build
 
-# Iteration-only: builds dae/daed for one arch and uploads the .apk as an artifact.
+# Iteration-only: builds dae/daed for release targets and uploads package artifacts.
 # No feed upload, no release — safe to run on feature branches.
+# Gate 用法：必须用 --ref candidate/<SHA>（tag）触发，并传 sha 输入，
+# 构建 checkout 该 SHA，保证"验证的是哪个 SHA"可查。
 
 on:
   workflow_dispatch:
     inputs:
+      sha:
+        description: 'Candidate SHA to build (must match the candidate tag); empty = trigger ref (iteration use)'
+        type: string
+        required: false
+        default: ''
       packages:
         description: Packages to build
         default: "dae daed"
+      arch:
+        description: Architecture (all for release matrix)
+        type: choice
+        default: all
+        options:
+          - all
+          - aarch64_cortex-a53
+          - aarch64_cortex-a72
+          - aarch64_generic
+          - arm_cortex-a7_neon-vfpv4
+          - arm_cortex-a9
+          - arm_cortex-a9_neon
+          - i386_pentium4
+          - x86_64
+      sdk:
+        description: SDK version (all for release matrix)
+        type: choice
+        default: all
+        options:
+          - all
+          - "24.10"
+          - "25.12"
 
 permissions:
   contents: read
@@ -19,13 +48,29 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        arch: [x86_64, aarch64_generic]
-        sdk: ["24.10", "25.12"]
+        arch: ${{ fromJSON(inputs.arch == 'all' && '["aarch64_cortex-a53","aarch64_cortex-a72","aarch64_generic","arm_cortex-a7_neon-vfpv4","arm_cortex-a9","arm_cortex-a9_neon","i386_pentium4","x86_64"]' || format('["{0}"]', inputs.arch)) }}
+        sdk: ${{ fromJSON(inputs.sdk == 'all' && '["24.10","25.12"]' || format('["{0}"]', inputs.sdk)) }}
     steps:
       - uses: actions/checkout@v6
+        with:
+          # sha 为空时用触发 ref（日常迭代）；gate 必须传 candidate SHA。
+          ref: ${{ inputs.sha != '' && inputs.sha || github.ref }}
+
+      - name: Prepare SDK action with pahole
+        uses: actions/checkout@v6
+        with:
+          repository: kenzok8/gh-action-sdk
+          ref: 44f98c51d04aebd1aa79fe4f603559c1ec2085da
+          path: .github/actions/gh-action-sdk
+          persist-credentials: false
+
+      - name: Add pahole to SDK image
+        run: git -C .github/actions/gh-action-sdk apply "$GITHUB_WORKSPACE/.github/patches/gh-action-sdk-pahole.patch"
 
       - name: Build packages
-        uses: kenzok8/gh-action-sdk@hash
+        id: sdk
+        continue-on-error: true
+        uses: ./.github/actions/gh-action-sdk
         env:
           CONTAINER: immortalwrt/sdk
           ARCH: ${{ matrix.arch }}-openwrt-${{ matrix.sdk }}
@@ -35,23 +80,62 @@ jobs:
           NO_REFRESH_CHECK: true
           IGNORE_ERRORS: false
           INDEX: 1
-          KEY_BUILD: ${{ secrets.OPKG_KEY_BUILD }}
-          PRIVATE_KEY: ${{ secrets.APK_PRIVATE_KEY }}
           GOLANG_REPO: https://github.com/kenzok8/golang
           GOLANG_BRANCH: '1.26'
 
-      - name: List built packages
+      - name: Validate requested packages
+        id: validate
         if: always()
-        run: ls -la bin/packages/${{ matrix.arch }}/daede/ 2>/dev/null || echo "no output dir"
+        env:
+          SDK_OUTCOME: ${{ steps.sdk.outcome }}
+          PACKAGES: ${{ github.event.inputs.packages }}
+        run: |
+          set -euo pipefail
+          if [ "$SDK_OUTCOME" != success ]; then
+            echo "::error::SDK action concluded $SDK_OUTCOME"
+            exit 1
+          fi
 
-      - uses: actions/upload-artifact@v6
-        if: always()
+          read -r -a requested <<< "$PACKAGES"
+          [ "${#requested[@]}" -gt 0 ] || {
+            echo "::error::packages input is empty"
+            exit 1
+          }
+          output_dir="bin/packages/${{ matrix.arch }}/daede"
+          for package in "${requested[@]}"; do
+            found=0
+            while IFS= read -r -d '' file; do
+              name=${file##*/}
+              case "$name" in
+                "$package"-*.apk|"$package"_*.apk|"$package"-*.ipk|"$package"_*.ipk)
+                  found=1
+                  break
+                  ;;
+              esac
+            done < <(find "$output_dir" -maxdepth 1 -type f \( -name '*.apk' -o -name '*.ipk' \) -print0 2>/dev/null || true)
+            if [ "$found" -ne 1 ]; then
+              echo "::error::requested package $package has no .apk or .ipk artifact"
+              exit 1
+            fi
+            echo "validated package $package"
+          done
+
+      - name: Upload package artifacts
+        if: steps.sdk.outcome == 'success' && steps.validate.outcome == 'success'
+        uses: actions/upload-artifact@v6
         with:
           name: pkgs-${{ matrix.arch }}-${{ matrix.sdk }}
           path: |
             bin/packages/${{ matrix.arch }}/daede/*.apk
             bin/packages/${{ matrix.arch }}/daede/*.ipk
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: logs-${{ matrix.arch }}-${{ matrix.sdk }}
+          path: |
             logs/**
             *.log
             **/*.log
-          if-no-files-found: warn
+          if-no-files-found: ignore
