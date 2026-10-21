@@ -8,7 +8,9 @@
 # 以及每项验证实际验证的 candidate SHA。
 #
 # 环境变量：
+#   BASE_SHA           候选构建时的 main SHA（必填）
 #   CANDIDATE_SHA      待晋升的候选 SHA（必填）
+#   STAGING            候选构建使用的 staging 分支（必填）
 #   GH_TOKEN           GitHub token，需 actions:read（必填）
 #   R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY / R2_ENDPOINT / R2_BUCKET（必填，
 #                      用于下载 verification.json；rclone 需已配置好）
@@ -24,7 +26,7 @@ fail() {
     exit 1
 }
 
-for name in CANDIDATE_SHA GH_TOKEN R2_ACCESS_KEY_ID \
+for name in BASE_SHA CANDIDATE_SHA STAGING GH_TOKEN R2_ACCESS_KEY_ID \
     R2_SECRET_ACCESS_KEY R2_ENDPOINT R2_BUCKET MANIFEST_PATH; do
     [[ -n "${!name:-}" ]] || fail "missing $name"
 done
@@ -64,8 +66,15 @@ rclone cat "r2:${R2_BUCKET}/openwrt-feed/daed-candidates/${CANDIDATE_SHA}/verifi
 python3 - "$workdir/verification.json" <<'PYEOF' > "$workdir/checks.tsv"
 import json, sys
 record = json.load(open(sys.argv[1]))
+assert record.get("schema_version") == 2, "unsupported verification schema"
+kind = record["kind"]
+assert kind in ("main", "upstream"), "invalid candidate kind"
 assert record["candidate_sha"], "verification.json: missing candidate_sha"
 print("CANDIDATE\t" + record["candidate_sha"])
+print("BASE\t" + record["base_sha"])
+print("STAGING\t" + record["staging"])
+print("KIND\t" + kind)
+print("AUTO_BUMP\t" + str(record["auto_bump_run_id"]) + "\t" + str(record["auto_bump_run_attempt"]))
 # step -> (workflow path, job 名)
 jobs = {
     "assemble-dae":  (".github/workflows/assemble-dae-src.yml", "assemble"),
@@ -88,16 +97,52 @@ for v in record["verifications"]:
         wf = ".github/workflows/" + wf
     assert wf == path, f"{step}: workflow mismatch: {v['workflow']}"
     print(f"{step}\t{v['run_id']}\t{v['attempt']}\t{v['head_sha']}\t{job}\t{path}")
-assert seen == set(jobs), f"missing verification steps: {set(jobs) - seen}"
+expected = set(jobs) if kind == "upstream" else {"audit", "smoke", "matrix"}
+assert seen == expected, f"verification steps differ: missing={expected - seen} extra={seen - expected}"
 PYEOF
 
 record_sha=$(awk -F'\t' '$1=="CANDIDATE" {print $2}' "$workdir/checks.tsv")
 [[ "$record_sha" == "$CANDIDATE_SHA" ]] || \
     fail "verification.json is for $record_sha, not $CANDIDATE_SHA"
+record_base=$(awk -F'\t' '$1=="BASE" {print $2}' "$workdir/checks.tsv")
+record_staging=$(awk -F'\t' '$1=="STAGING" {print $2}' "$workdir/checks.tsv")
+record_kind=$(awk -F'\t' '$1=="KIND" {print $2}' "$workdir/checks.tsv")
+read -r auto_bump_run auto_bump_attempt < <(awk -F'\t' '$1=="AUTO_BUMP" {print $2, $3}' "$workdir/checks.tsv")
+[[ "$record_base" == "$BASE_SHA" && "$record_staging" == "$STAGING" ]] || \
+    fail "candidate base or staging differs from the frozen record"
+[[ "$record_base" =~ ^[0-9a-f]{40}$ && "$record_staging" =~ ^auto-bump-staging-[0-9]+-[0-9]+$ ]] || \
+    fail "invalid candidate base or staging"
+if [[ "$record_kind" == main ]]; then
+    [[ "$record_base" == "$CANDIDATE_SHA" ]] || fail "main candidate differs from its base"
+else
+    [[ "$record_base" != "$CANDIDATE_SHA" ]] || fail "upstream candidate has no staged commit"
+fi
+[[ "$auto_bump_run" =~ ^[0-9]+$ && "$auto_bump_attempt" =~ ^[0-9]+$ ]] || \
+    fail "invalid candidate orchestrator run"
+origin_json=$(gh api "repos/${REPO}/actions/runs/${auto_bump_run}" \
+    --jq '{path: .path, head_sha: .head_sha, event: .event}') || \
+    fail "cannot read candidate orchestrator run"
+origin_path=$(printf '%s' "$origin_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["path"])')
+origin_head=$(printf '%s' "$origin_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["head_sha"])')
+origin_event=$(printf '%s' "$origin_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["event"])')
+[[ "$origin_path" == .github/workflows/auto-bump.yml && "$origin_head" == "$record_base" ]] || \
+    fail "candidate orchestrator workflow or head SHA differs"
+[[ "$origin_event" == workflow_dispatch || "$origin_event" == schedule ]] || \
+    fail "candidate orchestrator event is $origin_event"
+[[ "$record_kind" != main || "$origin_event" == workflow_dispatch ]] || \
+    fail "main candidate was not manually requested"
+origin_jobs=$(gh api "repos/${REPO}/actions/runs/${auto_bump_run}/attempts/${auto_bump_attempt}/jobs") || \
+    fail "cannot read candidate orchestrator jobs"
+origin_result=$(printf '%s' "$origin_jobs" | python3 -c '
+import json,sys
+matches = [job["conclusion"] for job in json.load(sys.stdin)["jobs"] if job["name"] == "bump"]
+print(matches[0] if len(matches) == 1 else "missing")
+')
+[[ "$origin_result" == success ]] || fail "candidate orchestrator bump job concluded $origin_result"
 
 matrix_run_id=""
 while IFS=$'\t' read -r step run_id attempt head_sha job_name expected_path; do
-    [[ "$step" == "CANDIDATE" ]] && continue
+    case "$step" in CANDIDATE|BASE|STAGING|KIND|AUTO_BUMP) continue ;; esac
     echo "verify-candidate: checking $step (run $run_id, attempt $attempt)"
     [[ "$run_id" =~ ^[0-9]+$ ]] || fail "$step: invalid run_id"
     [[ "$attempt" =~ ^[0-9]+$ ]] || fail "$step: invalid attempt"

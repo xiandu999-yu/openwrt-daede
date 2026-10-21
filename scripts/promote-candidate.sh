@@ -21,8 +21,8 @@ jq -e --arg sha "$CANDIDATE_SHA" --argjson run "$BUILD_RUN_ID" \
     publish/manifest.json >/dev/null || fail "manifest does not identify this candidate and build"
 cp publish/manifest.json publish/feed/release-manifest.json
 
-# 完整验证来源校验：用 GitHub API 证明 candidate 经过了全部验证
-#（assemble dae/daed、audit、单构建、16 目标矩阵），且每项验证的都是该 SHA。
+# 完整验证来源校验：用 GitHub API 证明 candidate 经过了其发布通道要求的验证
+#（代码修复为 audit、单构建、16 目标矩阵；上游同步还包含两次 assemble）。
 # verification.json 只做关联，证明来自 API。fail-closed，发生在改动 main 之前。
 MANIFEST_PATH="$PWD/publish/manifest.json" \
     bash "$(dirname "$0")/verify-candidate.sh"
@@ -51,9 +51,6 @@ if [[ -z "$remote_tag" ]]; then
     remote_tag=$(git ls-remote --tags origin "refs/tags/$tag" | cut -f1)
 fi
 [[ -z "$remote_tag" || "$remote_tag" = "$CANDIDATE_SHA" ]] || fail "tag $tag points to another commit"
-if [[ "$remote_main" = "$CANDIDATE_SHA" && -z "$remote_tag" ]]; then
-    fail "main already advanced but tag is absent; requires manual inspection"
-fi
 
 # Stage and verify the exact candidate bytes before changing main or a release.
 rclone_dir=$(mktemp -d)
@@ -119,7 +116,12 @@ else
         fail "pending release state differs after upload"
 fi
 
-if [[ "$remote_main" = "$BASE_SHA" ]]; then
+if [[ "$remote_main" = "$CANDIDATE_SHA" && -z "$remote_tag" && "$BASE_SHA" = "$CANDIDATE_SHA" ]]; then
+    git config user.name "github-actions[bot]"
+    git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+    git tag -a "$tag" "$CANDIDATE_SHA" -m "Release $tag"
+    git -c credential.helper='!gh auth git-credential' push origin "refs/tags/$tag:refs/tags/$tag"
+elif [[ "$remote_main" = "$BASE_SHA" && -z "$remote_tag" ]]; then
     git config user.name "github-actions[bot]"
     git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
     git tag -a "$tag" "$CANDIDATE_SHA" -m "Release $tag"
@@ -127,6 +129,8 @@ if [[ "$remote_main" = "$BASE_SHA" ]]; then
         --force-with-lease="refs/heads/main:$BASE_SHA" origin \
         "$CANDIDATE_SHA:refs/heads/main" "refs/tags/$tag:refs/tags/$tag"
     [[ "$(git ls-remote origin refs/heads/main | cut -f1)" = "$CANDIDATE_SHA" ]] || fail "main did not advance to candidate"
+elif [[ "$remote_main" != "$CANDIDATE_SHA" || "$remote_tag" != "$CANDIDATE_SHA" ]]; then
+    fail "main and tag do not identify the same verified candidate"
 fi
 
 notes="$rclone_dir/release-notes.md"
@@ -195,8 +199,11 @@ gh release view "$tag" --json assets --jq '.assets[].name' | sort > "$rclone_dir
 diff -u "$rclone_dir/expected-assets" "$rclone_dir/actual-assets" || fail "Release has unexpected or missing assets"
 
 feed="r2:${R2_BUCKET}/openwrt-feed/daed"
+echo "=== [R2] uploading daed feed ==="
 rclone sync publish/feed/ "$feed/" --checksum --fast-list --transfers 8 --checkers 16
+echo "=== [R2] verifying uploaded daed feed ==="
 rclone check publish/feed/ "$feed/" --download --fast-list
+echo "=== [R2] daed feed upload verified ==="
 
 aggregate_url=$(GH_TOKEN="$AGGREGATE_FEED_TOKEN" gh workflow run aggregate-feed.yml \
     -R kenzok8/openwrt-clashoo --ref main \
@@ -211,6 +218,16 @@ gh release edit "$tag" --draft=false --prerelease=false
 git -c credential.helper='!gh auth git-credential' push origin \
     --delete "refs/tags/candidate/${CANDIDATE_SHA}" 2>/dev/null \
     || echo "warning: cannot delete candidate tag (non-fatal)"
+# staging 分支同样只是 gate 阶段的临时工作区；发布成功后一并删除，
+# 防止 auto-bump-staging-* 累积。先核对远端 staging 仍指向本次候选，
+# 避免误删已移动的同名分支；删除失败不致命。
+if [ "$(git ls-remote origin "refs/heads/${STAGING}" | cut -f1)" = "$CANDIDATE_SHA" ]; then
+    git -c credential.helper='!gh auth git-credential' push origin \
+        --delete "refs/heads/${STAGING}" 2>/dev/null \
+        || echo "warning: cannot delete staging branch (non-fatal)"
+else
+    echo "staging branch ${STAGING} no longer points at ${CANDIDATE_SHA}; leaving it"
+fi
 # --checksum：promote 中断后重跑时文件已存在但内容相同，按内容比对可幂等。
 rclone copyto "$rclone_dir/pending.json" "$state/completed/${CANDIDATE_SHA}.json" --immutable --checksum
 rclone cat "$state/completed/${CANDIDATE_SHA}.json" > "$rclone_dir/completed.json"

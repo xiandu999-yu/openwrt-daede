@@ -7,9 +7,9 @@ GITHUB_API_URL="https://api.github.com/repos/kenzok8/openwrt-daede/releases/late
 GITHUB_PROXY_PREFIX="${GITHUB_PROXY_PREFIX:-https://ghfast.top/}"
 TMP_DIR="/tmp/daede-install"
 
-# Which core backend to install alongside the LuCI app. daed ships the WebUI
-# and is the default the LuCI app expects. Override with DAEDE_CORE=dae|daed|both.
-DAEDE_CORE="${DAEDE_CORE:-daed}"
+# Install both cores alongside the LuCI app by default so either backend is
+# available. Override with DAEDE_CORE=dae|daed|both.
+DAEDE_CORE="${DAEDE_CORE:-both}"
 
 # Capture each attempt so a failed curl cannot prepend a partial response to wget.
 # Keep tool errors on stderr: HTTP status, TLS and DNS errors matter for diagnosis.
@@ -489,7 +489,7 @@ if [ "$PM" = "opkg" ]; then
 else
   echo "[WARN] no stable signing key yet, using --allow-untrusted; sha256 is verified above when the manifest provides it."
   # shellcheck disable=SC2086
-  apk add --allow-untrusted $FILES || _install_rc=$?
+  apk add --allow-untrusted --force-non-repository $FILES || _install_rc=$?
 fi
 
 # opkg/apk can exit 0 yet skip the core package on a dependency hiccup (issue #30),
@@ -521,6 +521,9 @@ if [ "$_install_rc" -ne 0 ]; then
 fi
 
 echo "Install complete."
+echo "[INFO] This one-click installer does not add a persistent package feed."
+echo "[INFO] LuCI online upgrades require a configured, signed daede feed."
+echo "[INFO] See https://github.com/kenzok8/openwrt-daede#release-%E6%89%8B%E5%8A%A8%E5%AE%89%E8%A3%85"
 
 # Supply kernel BTF if the firmware ships none, else dae/daed eBPF won't load.
 ensure_btf "$PM" "$RESOLVED_ARCH" || true
